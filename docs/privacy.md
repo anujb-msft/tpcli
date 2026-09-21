@@ -16,6 +16,11 @@
   never a durable transcript/task/approval-content spool. The runtime has bounded
   volatile event replay. A worker failure or a prolonged client outage can lose
   content. Gaps and interrupted output remain explicit; summaries may be absent.
+- ACS media URLs carry a short-lived, one-use application capability under the
+  v0.4 exception, never an API key, connection string or other long-lived secret.
+  Durable storage contains its digest and minimal authority/endpoint binding only.
+  Application middleware removes the query and raw target before routing and
+  suppresses transport logging, but upstream ingress/APM must be verified separately.
 
 `transcripts show`, event subscriptions, and history rendering deliberately
 decrypt content to stdout for the requesting process. Redirecting that output
@@ -23,6 +28,10 @@ creates an operator-owned plaintext export. The application never does that for
 diagnostics. Secure the consuming agent host, terminal scrollback, and any export.
 Disable body tracing and memory/core dumps on media workers: a dump can contain
 transient audio, conversation content or credentials even without audio recording.
+Keep media-URL logging evidence current; expiration blocks media preparation and
+acceptance. Never paste a live media URL into a terminal, diagnostic request,
+ticket, trace annotation or chat. A consumed, expired or revoked grant cannot
+authorize reconnection or be renewed to keep a call alive.
 
 No application audio recording does **not** imply zero Azure/carrier retention or
 end-to-end PSTN encryption. Azure services process audio and text under their

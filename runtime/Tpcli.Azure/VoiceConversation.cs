@@ -46,6 +46,7 @@ internal sealed class VoiceConversation : IAsyncDisposable
     private ResponseState? _current;
     private bool _disclosureRequested;
     private bool _interruptInProgress;
+    private int _activated;
 
     internal VoiceConversation(IVoiceTransport transport, CallContext context, VoiceLiveOptions options,
         TimeProvider clock, AudioBuffer output, Action<ProviderSignal> publish,
@@ -70,7 +71,23 @@ internal sealed class VoiceConversation : IAsyncDisposable
         await _transport.SendAsync(VoiceProtocol.Configure(_options), cancellationToken).ConfigureAwait(false);
         await _configured.Task.WaitAsync(TimeSpan.FromSeconds(15), _clock, cancellationToken).ConfigureAwait(false);
         CheckDeadline(cancellationToken);
+    }
+
+    internal async Task ActivateAsync(CancellationToken cancellationToken)
+    {
+        CheckDeadline(cancellationToken);
+        if (!_configured.Task.IsCompletedSuccessfully)
+            throw new ProviderException("VOICE_NOT_READY");
+        if (Interlocked.Exchange(ref _activated, 1) != 0)
+            throw new ProviderException("VOICE_ALREADY_ACTIVATED");
         await _transport.SendAsync(VoiceProtocol.OperatorContext(_context.Task, _context.AllowVoicemail, "initial_task"), cancellationToken).ConfigureAwait(false);
+        await SetAutomaticResponseAsync(true, cancellationToken).ConfigureAwait(false);
+    }
+
+    private void CheckActive(CancellationToken cancellationToken)
+    {
+        CheckDeadline(cancellationToken);
+        if (Volatile.Read(ref _activated) != 1) throw new ProviderException("VOICE_NOT_READY");
     }
 
     private void CheckDeadline(CancellationToken cancellationToken)
@@ -82,6 +99,7 @@ internal sealed class VoiceConversation : IAsyncDisposable
 
     internal async Task DiscloseAsync(CancellationToken cancellationToken)
     {
+        CheckActive(cancellationToken);
         lock (_gate)
         {
             if (_disclosureRequested) return;
@@ -93,7 +111,7 @@ internal sealed class VoiceConversation : IAsyncDisposable
 
     internal async Task AppendAudioAsync(byte[] audio, CancellationToken cancellationToken)
     {
-        CheckDeadline(cancellationToken);
+        CheckActive(cancellationToken);
         await _transport.SendAsync(new JsonObject
         {
             ["type"] = "input_audio_buffer.append",
@@ -104,7 +122,7 @@ internal sealed class VoiceConversation : IAsyncDisposable
     internal async Task InstructAsync(string text, CancellationToken cancellationToken)
     {
         AzureValidation.Text(text);
-        CheckDeadline(cancellationToken);
+        CheckActive(cancellationToken);
         await InterruptAsync(cancellationToken).ConfigureAwait(false);
         await WaitForResponseAsync(cancellationToken).ConfigureAwait(false);
         CheckDeadline(cancellationToken);
@@ -115,7 +133,7 @@ internal sealed class VoiceConversation : IAsyncDisposable
 
     internal async Task CompleteToolAsync(string toolCallId, JsonObject result, CancellationToken cancellationToken)
     {
-        CheckDeadline(cancellationToken);
+        CheckActive(cancellationToken);
         if (result.ToJsonString().Length > 65_536)
             throw new ProviderException("VOICE_TOOL_RESULT_TOO_LARGE");
         ToolState tool;
@@ -165,6 +183,11 @@ internal sealed class VoiceConversation : IAsyncDisposable
     internal async Task HandleAsync(JsonObject message, CancellationToken cancellationToken)
     {
         var type = VoiceProtocol.RequiredString(message, "type");
+        if (Volatile.Read(ref _activated) == 0 &&
+            (type.StartsWith("response.", StringComparison.Ordinal) ||
+             type.StartsWith("input_audio_buffer.", StringComparison.Ordinal) ||
+             type.StartsWith("conversation.item.", StringComparison.Ordinal)))
+            throw new ProviderException("VOICE_PREWARM_NOT_EMPTY");
         switch (type)
         {
             case "session.updated":

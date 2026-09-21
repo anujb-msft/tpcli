@@ -29,9 +29,19 @@ approval query/event ordering, protocol validation and shared JSON fixtures.
 The command subprocess tests exercise the shipped binary, not an in-memory CLI
 substitute.
 
-One initial full .NET run intermittently failed the request-limit API test;
-focused and subsequent full runs passed. Its cause is not yet established and
-remains a test-reliability investigation, not a silently resolved result.
+The v0.4 local checkpoint passes **13 Rust tests, 275 .NET tests** (132 Azure
+adapter and 143 runtime/control tests), and **29 Python subprocess tests**
+(10 CLI and 19 cross-process scenarios). The integrated .NET build has no
+warnings or errors; Rust strict clippy, both format checks, and offline Bicep
+compilation also pass. These counts describe local evidence, not live trials.
+
+An intermittent request-limit test failure was reproduced as a **TestServer
+teardown race**, not a failed size-limit assertion: owner-WebSocket cleanup could
+recreate SQLite sidecars while the test directory was being deleted. The harness
+now aborts its owned sockets and awaits request cleanup before disposing the store.
+The original test passed 20 consecutive repetitions after that change. Additional
+tests cover 65,535/65,536/65,537-byte requests with and without Content-Length, and
+16,383/16,384/16,385-byte UTF-8 tasks. No request or task limit was widened.
 
 `tests/test_e2e.py` starts real Rust CLI/broker processes, the ASP.NET Core runtime,
 and a separate .NET watchdog process. It uses ephemeral profiles, random injected
@@ -58,12 +68,12 @@ ephemeral test keys and does not establish Linux production credential support.
 | A9: selective approvals | Exact hashes, expiry, stale conversation rejection, explicit denial with actor audit, one-time consumption, late approval after owner loss, deadline preemption and no timeout approval. | Model/prompt-injection evaluations are not a guarantee that every spoken or IVR commitment is recognized. |
 | A10: genuine encryption | Standard SQLite cannot open history; wrong/missing key, absent cipher, full disk, WAL, encrypted backup, migration and pruning checks. | Exercise operator key recovery and deployment-specific backup/retention procedures. |
 | A11: content privacy | Fake runtime logs/control database exclude synthetic task/transcript markers; no application audio-file writer is used. | Audit deployed ingress, SDK/APM, traces, crash dumps and carrier/Azure retention. |
-| A12: explicit uncertainty | Distinct result dimensions, a completed-task/confirmed-hangup/retained-summary roundtrip, interrupted segment delivery, gap markers, incomplete local state after worker loss, and nonzero unknown-hangup results. | Measure real speech interruption/delivery and summary quality. |
+| A12: explicit uncertainty | Distinct result dimensions; completed-task/confirmed-hangup/encrypted-summary roundtrip preserving facts, commitments, outstanding items and sources; interrupted output, gap markers, incomplete local state after worker loss, and nonzero unknown-hangup results. | Measure real speech interruption/delivery and summary quality. |
 | A13: hard deadline | Whole-call deadline terminates during a pending approval; approval waits do not extend it. | Validate real carrier setup/hold/termination timing. |
 | A14: honest doctor | Offline doctor and auth status make zero network requests. Online capability checks are non-dialing. | Resource existence is not proof of working model, voice, TPE source or end-to-end media. |
 | A15: observers are not owners | Viewer Ctrl+C, actual PTY shell job control, slow-reader disconnection, concurrent control and actual orphan-broker exit. | Validate the chosen agent host's lifetime and notification integration. |
 | A16: durable async results | Lost receipt recovery, event-before-receipt storage, queried approvals before events, replay/live equality and idle cursor preservation. | A host must consume push events or issue finite polls; an exited stdout process cannot notify it. |
-| A17: disposable media grants | The approved v0.4 contract is included; grant-store/adapter integration is active implementation work. | Do not enable live media until scoped one-use consumption, negative/race tests and deployed URL-log controls are all established. |
+| A17: disposable media grants | Application capabilities are issued for a specific call/session/tenant/principal, endpoint and current worker/fence/owner generation. Durable digest-only storage atomically permits one consumer; expiry, revocation, stale scope, races and captured-log redaction are tested. | Verify PostgreSQL coordination and every deployed ingress/APM/logging layer. An expiring logging attestation is required; it is not a substitute for deployment evidence or proof of native ACS media identity. |
 
 For the silent-owner A5 test, the assertions use **server timestamps**:
 the fixed 15-second lease expiry identifies the last accepted heartbeat, and both

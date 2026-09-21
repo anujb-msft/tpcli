@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using Microsoft.AspNetCore.Http;
 using Tpcli.Contracts;
 
 namespace Tpcli.Azure;
@@ -54,8 +55,12 @@ internal sealed class AzureCallConnection : ICallConnection
         new BoundedChannelOptions(128) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _mediaReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly VoiceConversation _voice;
+    private readonly IVoiceTransportFactory _voiceFactory;
+    private readonly MediaGrantAuthentication _mediaAuthentication;
+    private readonly AzureMediaGrantScope _mediaScope;
+    private VoiceConversation? _voice;
     private readonly ITimer _deadlineTimer;
+    private ITimer? _mediaSetupTimer;
     private Task? _signalPump;
     private Task? _inputPump;
     private WebSocket? _socket;
@@ -64,11 +69,16 @@ internal sealed class AzureCallConnection : ICallConnection
     private bool _disconnected;
     private int _dialStarted;
     private int _mediaAccepted;
+    private int _mediaAuthorized;
+    private int _voiceStarted;
+    private int _voicePrepared;
+    private int _mediaPrepared;
     private int _failed;
     private int _disposed;
 
     internal AzureCallConnection(CallContext context, AzureOptions options, ICallAutomationTransport telephony,
-        IVoiceTransport voice, IProviderEventSink sink, CorrelateCall correlate, AzureCallRegistry registry, TimeProvider clock)
+        IVoiceTransportFactory voice, IProviderEventSink sink, CorrelateCall correlate, AzureCallRegistry registry, TimeProvider clock,
+        MediaGrantAuthentication mediaAuthentication, AzureMediaGrantScope mediaScope)
     {
         _context = context;
         _options = options;
@@ -79,8 +89,9 @@ internal sealed class AzureCallConnection : ICallConnection
         _clock = clock;
         _input = new AudioBuffer(clock);
         _output = new AudioBuffer(clock);
-        _voice = new VoiceConversation(voice, context, options.VoiceLive, clock, _output, Publish,
-            StopOutputAsync, FailAsync, _stop.Token);
+        _voiceFactory = voice;
+        _mediaAuthentication = mediaAuthentication;
+        _mediaScope = mediaScope;
         var remaining = context.Deadline - clock.GetUtcNow();
         _deadlineTimer = clock.CreateTimer(_ => _ = FailAsync("DEADLINE_EXCEEDED"), null,
             remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, Timeout.InfiniteTimeSpan);
@@ -88,15 +99,37 @@ internal sealed class AzureCallConnection : ICallConnection
 
     internal async Task InitializeAsync(CancellationToken cancellationToken)
     {
+        CheckSideEffect(cancellationToken);
+        if (Interlocked.Exchange(ref _voiceStarted, 1) != 0)
+            throw new ProviderException("VOICE_ALREADY_PREPARED");
         _signalPump = SignalPumpAsync();
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
-        await _voice.InitializeAsync(linked.Token).ConfigureAwait(false);
-        _inputPump = InputPumpAsync();
+        try
+        {
+            _mediaAuthentication.EnsureLoggingVerified();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            await _mediaAuthentication.RevalidateScopeAsync(_context, _mediaScope, timeout.Token).ConfigureAwait(false);
+            CheckSideEffect(timeout.Token);
+            var transport = await _voiceFactory.ConnectAsync(timeout.Token).ConfigureAwait(false);
+            _voice = new VoiceConversation(transport, _context, _options.VoiceLive, _clock, _output, Publish,
+                StopOutputAsync, FailAsync, _stop.Token);
+            await _voice.InitializeAsync(timeout.Token).ConfigureAwait(false);
+            await _mediaAuthentication.RevalidateScopeAsync(_context, _mediaScope, timeout.Token).ConfigureAwait(false);
+            _mediaAuthentication.EnsureLoggingVerified();
+            CheckSideEffect(timeout.Token);
+            Volatile.Write(ref _voicePrepared, 1);
+        }
+        catch
+        {
+            await FailAsync("VOICE_INITIALIZATION_FAILED").ConfigureAwait(false);
+            throw new ProviderException("VOICE_INITIALIZATION_FAILED");
+        }
     }
 
     public async Task<ProviderHandle> DialAsync(CancellationToken cancellationToken)
     {
         CheckSideEffect(cancellationToken);
+        if (Volatile.Read(ref _voicePrepared) != 1) throw new ProviderException("VOICE_NOT_READY");
         if (!_options.Evidence.IsCurrent(_clock.GetUtcNow()))
             throw new ProviderException("TPE_READINESS_UNVERIFIED");
         if (Interlocked.Exchange(ref _dialStarted, 1) != 0)
@@ -105,7 +138,13 @@ internal sealed class AzureCallConnection : ICallConnection
         ProviderHandle? dispatched = null;
         try
         {
-            var handle = await _telephony.DialAsync(_context, linked.Token).ConfigureAwait(false);
+            var grant = await _mediaAuthentication.IssueAsync(_context, _mediaScope, linked.Token).ConfigureAwait(false);
+            CheckSideEffect(linked.Token);
+            var remaining = grant.ExpiresAt - _clock.GetUtcNow();
+            if (remaining <= TimeSpan.Zero) throw new ProviderException("MEDIA_GRANT_EXPIRED");
+            _mediaSetupTimer = _clock.CreateTimer(_ => _ = FailAsync("MEDIA_GRANT_EXPIRED"), null,
+                remaining, Timeout.InfiniteTimeSpan);
+            var handle = await _telephony.DialAsync(_context, grant, linked.Token).ConfigureAwait(false);
             dispatched = handle;
             BindHandle(handle);
             if (!await _correlate(_context.CallId, handle.ConnectionId, handle.ServerCallId, cancellationToken).ConfigureAwait(false))
@@ -160,10 +199,68 @@ internal sealed class AzureCallConnection : ICallConnection
 
     private async Task WatchMediaStartupAsync()
     {
-        try { await _mediaReady.Task.WaitAsync(TimeSpan.FromSeconds(10), _clock, _stop.Token).ConfigureAwait(false); }
+        try { await _mediaReady.Task.WaitAsync(TimeSpan.FromSeconds(30), _clock, _stop.Token).ConfigureAwait(false); }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
         catch (TimeoutException) { await FailAsync("MEDIA_START_TIMEOUT").ConfigureAwait(false); }
     }
+
+    internal async Task<AuthenticatedMedia> AuthenticateMediaAsync(HttpContext http, CancellationToken cancellationToken)
+    {
+        CheckSideEffect(cancellationToken);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
+        await _mediaAuthentication.ConsumeAsync(http, _context, _mediaScope, linked.Token).ConfigureAwait(false);
+        if (Interlocked.Exchange(ref _mediaAuthorized, 1) != 0)
+            throw new ProviderException("MEDIA_REPLAY_REJECTED");
+        _mediaSetupTimer?.Dispose();
+        try
+        {
+            await _connected.Task.WaitAsync(TimeSpan.FromSeconds(10), _clock, linked.Token).ConfigureAwait(false);
+            CheckSideEffect(linked.Token);
+            var handle = _handle;
+            if (handle is null || string.IsNullOrEmpty(_correlationId) ||
+                http.Request.Headers["x-ms-call-connection-id"].ToString() != handle.ConnectionId ||
+                http.Request.Headers["x-ms-call-correlation-id"].ToString() != _correlationId)
+                throw new ProviderException("MEDIA_CORRELATION_REJECTED");
+            return new AuthenticatedMedia(_context.CallId, handle.ConnectionId, _correlationId);
+        }
+        catch
+        {
+            await FailAsync("MEDIA_AUTHENTICATED_SETUP_FAILED").ConfigureAwait(false);
+            throw new ProviderException("MEDIA_AUTHENTICATED_SETUP_FAILED");
+        }
+    }
+
+    internal async Task PrepareMediaAsync(AuthenticatedMedia identity, CancellationToken cancellationToken)
+    {
+        CheckSideEffect(cancellationToken);
+        if (Volatile.Read(ref _mediaAuthorized) != 1 || identity.CallId != _context.CallId ||
+            identity.ConnectionId != _handle?.ConnectionId || identity.CorrelationId != _correlationId)
+            throw new ProviderException("MEDIA_GRANT_REJECTED");
+        if (_voice is null || Volatile.Read(ref _voicePrepared) != 1)
+            throw new ProviderException("VOICE_NOT_READY");
+        if (Interlocked.Exchange(ref _mediaPrepared, 1) != 0)
+            throw new ProviderException("MEDIA_REPLAY_REJECTED");
+        try
+        {
+            _mediaAuthentication.EnsureLoggingVerified();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            await _mediaAuthentication.RevalidateScopeAsync(_context, _mediaScope, timeout.Token).ConfigureAwait(false);
+            CheckSideEffect(timeout.Token);
+            await _voice.ActivateAsync(timeout.Token).ConfigureAwait(false);
+            await _mediaAuthentication.RevalidateScopeAsync(_context, _mediaScope, timeout.Token).ConfigureAwait(false);
+            _mediaAuthentication.EnsureLoggingVerified();
+            CheckSideEffect(timeout.Token);
+            _inputPump = InputPumpAsync();
+        }
+        catch
+        {
+            await FailAsync("VOICE_INITIALIZATION_FAILED").ConfigureAwait(false);
+            throw new ProviderException("VOICE_INITIALIZATION_FAILED");
+        }
+    }
+
+    internal Task MediaSetupFailedAsync() => FailAsync("MEDIA_TRANSPORT_FAILED");
 
     internal void Disconnected(ProviderHandle handle)
     {
@@ -186,8 +283,10 @@ internal sealed class AzureCallConnection : ICallConnection
     public async Task InstructAsync(string text, CancellationToken cancellationToken)
     {
         CheckSideEffect(cancellationToken);
+        if (!_mediaReady.Task.IsCompletedSuccessfully) throw new ProviderException("VOICE_NOT_READY");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
-        await ControlAsync(() => _voice.InstructAsync(text, linked.Token)).ConfigureAwait(false);
+        var voice = _voice ?? throw new ProviderException("VOICE_NOT_READY");
+        await ControlAsync(() => voice.InstructAsync(text, linked.Token)).ConfigureAwait(false);
     }
 
     public async Task SendDtmfAsync(string digits, CancellationToken cancellationToken)
@@ -205,8 +304,10 @@ internal sealed class AzureCallConnection : ICallConnection
     public async Task CompleteToolAsync(string toolCallId, JsonObject result, CancellationToken cancellationToken)
     {
         CheckSideEffect(cancellationToken);
+        if (!_mediaReady.Task.IsCompletedSuccessfully) throw new ProviderException("VOICE_NOT_READY");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
-        await ControlAsync(() => _voice.CompleteToolAsync(toolCallId, result, linked.Token)).ConfigureAwait(false);
+        var voice = _voice ?? throw new ProviderException("VOICE_NOT_READY");
+        await ControlAsync(() => voice.CompleteToolAsync(toolCallId, result, linked.Token)).ConfigureAwait(false);
     }
 
     private async Task ControlAsync(Func<Task> action)
@@ -223,6 +324,9 @@ internal sealed class AzureCallConnection : ICallConnection
     internal async Task RunMediaAsync(WebSocket socket, AuthenticatedMedia identity, CancellationToken cancellationToken)
     {
         CheckSideEffect(cancellationToken);
+        if (Volatile.Read(ref _mediaAuthorized) != 1)
+            throw new ProviderException("MEDIA_GRANT_REJECTED");
+        if (_voice is null || Volatile.Read(ref _mediaPrepared) != 1) throw new ProviderException("VOICE_NOT_READY");
         if (identity.CallId != _context.CallId || identity.ConnectionId != _handle?.ConnectionId ||
             string.IsNullOrEmpty(identity.CorrelationId))
             throw new ProviderException("MEDIA_CORRELATION_REJECTED");
@@ -285,7 +389,7 @@ internal sealed class AzureCallConnection : ICallConnection
                     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
                     timeout.CancelAfter(TimeSpan.FromMilliseconds(500));
                     CheckSideEffect(timeout.Token);
-                    await _voice.AppendAudioAsync(frame.Bytes, timeout.Token).ConfigureAwait(false);
+                    await _voice!.AppendAudioAsync(frame.Bytes, timeout.Token).ConfigureAwait(false);
                 }
                 finally { _input.Release(frame); }
             }
@@ -309,7 +413,7 @@ internal sealed class AzureCallConnection : ICallConnection
                     try
                     {
                         CheckSideEffect(timeout.Token);
-                        if (_voice.CanSend(frame))
+                        if (_voice!.CanSend(frame))
                         {
                             await socket.SendAsync(AcsMediaProtocol.Outgoing(frame.Bytes), WebSocketMessageType.Text, true, timeout.Token).ConfigureAwait(false);
                             _voice.AudioSent(frame);
@@ -397,12 +501,13 @@ internal sealed class AzureCallConnection : ICallConnection
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _registry.Remove(_context.CallId, this);
         _deadlineTimer.Dispose();
+        _mediaSetupTimer?.Dispose();
         if (!_disconnected && _handle is { } handle)
             await TerminateBoundedAsync(handle.ConnectionId).ConfigureAwait(false);
         await _stop.CancelAsync().ConfigureAwait(false);
         _socket?.Abort();
         _signals.Writer.TryComplete();
-        await _voice.DisposeAsync().ConfigureAwait(false);
+        if (_voice is not null) await _voice.DisposeAsync().ConfigureAwait(false);
         if (_inputPump is not null) await _inputPump.ConfigureAwait(false);
         if (_signalPump is not null) await _signalPump.ConfigureAwait(false);
         _input.Dispose();

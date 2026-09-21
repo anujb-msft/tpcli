@@ -38,13 +38,36 @@ public sealed class SdkTransportTests
     public async Task AmbiguousSdkCreateHasOneAttemptAndOnlyASafeCode()
     {
         var sdk = new StubSdk();
-        var error = await Assert.ThrowsAsync<ProviderException>(() => Transport(sdk).DialAsync(Fixture.Context(), CancellationToken.None));
+        var error = await Assert.ThrowsAsync<ProviderException>(() => Transport(sdk).DialAsync(Fixture.Context(), Fixture.TransportGrant(), CancellationToken.None));
         Assert.Equal(1, sdk.Creates);
         Assert.True(error.MayHaveDispatched);
         Assert.Equal("PROVIDER_DISPATCH_UNKNOWN", error.Code);
         Assert.Equal(error.Code, error.Message);
         Assert.NotNull(sdk.CreateOptions!.TeamsAppSource);
         Assert.Null(sdk.CreateOptions.CallInvite.SourceCallerIdNumber);
+    }
+
+    [Fact]
+    public void PinnedSdkStartStreamingCannotOverrideTheCreateCallTransportUri()
+    {
+        Assert.Equal(["OperationCallbackUri", "OperationContext"],
+            typeof(StartMediaStreamingOptions).GetProperties().Select(p => p.Name).Order(StringComparer.Ordinal));
+        Assert.Null(typeof(StartMediaStreamingOptions).GetProperty("TransportUri"));
+        Assert.NotNull(typeof(CallMedia).GetMethod(nameof(CallMedia.StartMediaStreamingAsync),
+            [typeof(StartMediaStreamingOptions), typeof(CancellationToken)]));
+        Assert.Equal(typeof(Uri), typeof(MediaStreamingOptions).GetProperty(nameof(MediaStreamingOptions.TransportUri))!.PropertyType);
+    }
+
+    [Fact]
+    public async Task AnExpiredGrantIsRejectedBeforeAnySdkCreateAttempt()
+    {
+        var sdk = new StubSdk();
+        var grant = Fixture.TransportGrant(new ManualClock(DateTimeOffset.UtcNow.AddMinutes(-2)));
+        var error = await Assert.ThrowsAsync<ProviderException>(() =>
+            Transport(sdk).DialAsync(Fixture.Context(), grant, CancellationToken.None));
+        Assert.Equal("MEDIA_GRANT_EXPIRED", error.Code);
+        Assert.False(error.MayHaveDispatched);
+        Assert.Equal(0, sdk.Creates);
     }
 
     [Fact]

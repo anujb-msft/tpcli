@@ -126,18 +126,31 @@ public static partial class Safe
         return true;
     }
     public static bool Terminal(CallState state) => state.Lifecycle is "ended" or "failed_before_connect";
+    public static bool HasResult(CallState state) => Terminal(state) || state.Lifecycle == "termination_unknown";
+    public static string ModelEndReason(string? reason) => reason switch
+    {
+        null or "task_finished" => "task_finished",
+        "objection" or "recipient_objection" => "recipient_objection",
+        "disallowed_voicemail" or "voicemail_disallowed" or "voicemail_not_allowed" => "voicemail_not_allowed",
+        "no_authorized_path" => "no_authorized_path",
+        _ => "agent_ended"
+    };
     public static string ProviderCode(string? value) => value switch
     {
         "FAKE_PREFLIGHT_FAILED" or "FAKE_DIAL_FAILED" or "CREATE_AMBIGUOUS" or "MEDIA_ERROR"
         or "MEDIA_OVERFLOW" or "MEDIA_DISCONNECTED" or "VOICE_LIVE_FAILED"
         or "VOICE_LIVE_UNAVAILABLE" or "ACS_CREATE_FAILED" or "ACS_CREATE_AMBIGUOUS"
         or "CALL_BUSY" or "NO_ANSWER" or "PROVIDER_DISCONNECTED" or "PROVIDER_TIMEOUT"
-        or "TEAMS_ROUTE_UNSUPPORTED" or "TPE_CONFIGURATION_REQUIRED" => value,
+        or "TEAMS_ROUTE_UNSUPPORTED" or "TPE_CONFIGURATION_REQUIRED" or "MEDIA_AUTH_UNVERIFIED"
+        or "MEDIA_GRANT_STORE_UNCONFIGURED" or "MEDIA_URL_LOGGING_UNVERIFIED"
+        or "CALLBACK_CORRELATION_UNCONFIGURED" or "TPE_READINESS_UNVERIFIED"
+        or "AZURE_ENDPOINT_INVALID" or "AZURE_IDENTITY_INVALID" or "MEDIA_GRANT_TTL_INVALID"
+        or "TPE_SOURCE_NOT_CONFIGURED" or "VOICE_CONFIGURATION_INVALID" or "VOICE_LOCALE_UNSUPPORTED" => value,
         _ => "PROVIDER_FAILURE"
     };
 
-    [GeneratedRegex(@"^pstn:\+[1-9][0-9]{6,14}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\Apstn:\+[1-9][0-9]{6,14}\z", RegexOptions.CultureInvariant)]
     public static partial Regex PstnTarget();
-    [GeneratedRegex(@"^[0-9A-D*#]{1,32}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\A[0-9*#]{1,32}\z", RegexOptions.CultureInvariant)]
     public static partial Regex Dtmf();
 }

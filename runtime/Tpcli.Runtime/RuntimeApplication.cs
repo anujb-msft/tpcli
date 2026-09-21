@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Options;
 using Tpcli.Azure;
 using Tpcli.Contracts;
 using Tpcli.Core;
@@ -22,6 +23,7 @@ public static class RuntimeApplication
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.None);
         builder.Logging.AddFilter("System.Net.Http", LogLevel.None);
+        builder.Services.AddSingleton<IPostConfigureOptions<LoggerFilterOptions>, TransportPrivacyLogFilters>();
         builder.Services.ConfigureHttpJsonOptions(options =>
         {
             options.SerializerOptions.PropertyNamingPolicy = Protocol.Json.PropertyNamingPolicy;
@@ -29,7 +31,12 @@ public static class RuntimeApplication
             options.SerializerOptions.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
         });
         builder.Services.AddTpcliControlStore(settings).AddTpcliCallRuntime();
-        if (settings.Mode == "azure") builder.Services.AddTpcliAzure(builder.Configuration);
+        if (settings.Mode == "azure")
+        {
+            builder.Services.AddSingleton<IAzureCallCorrelation, AzureDurableCorrelation>();
+            builder.Services.AddSingleton<IAzureMediaGrantStore, AzureDurableMediaGrants>();
+            builder.Services.AddTpcliAzure(builder.Configuration);
+        }
         builder.Services.AddRuntimeAuthentication(settings);
         var app = builder.Build();
         if (settings.Mode == "azure" && settings.TrustedProxies.Length > 0) app.UseForwardedHeaders();

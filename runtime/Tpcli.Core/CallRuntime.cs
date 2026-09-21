@@ -135,7 +135,7 @@ public sealed class CallRuntime(
                     if (target.StartsWith("teams:", StringComparison.Ordinal) && !Capabilities.Teams)
                         throw new ControlException("TEAMS_ROUTE_UNSUPPORTED");
                     if (target.StartsWith("pstn:", StringComparison.Ordinal) && !Capabilities.Pstn)
-                        throw new ControlException("PSTN_ROUTE_UNSUPPORTED");
+                        throw new ControlException(PstnReadinessBlocker());
                     if (await tx.HasActiveCallAsync(caller, session.Profile)) throw new ControlException("ACTIVE_CALL_EXISTS");
                     if (actors.Count >= settings.MaxResidentCalls) throw new ControlException("RUNTIME_CAPACITY", 429, true);
                     var id = Safe.Id("call");
@@ -221,6 +221,11 @@ public sealed class CallRuntime(
             throw new ControlException("STALE_APPROVAL");
         return approval;
     }
+
+    private string PstnReadinessBlocker() =>
+        Capabilities.Checks.Where(check => check.Status == "blocked" && check.Name != "teams_direct")
+            .Select(check => Safe.ProviderCode(check.Code))
+            .FirstOrDefault(code => code != "PROVIDER_FAILURE") ?? "PSTN_ROUTE_UNSUPPORTED";
 
     public async Task<CommandReceipt> CommandAsync(Caller caller, string commandId, CancellationToken cancellationToken = default) =>
         await store.TransactionAsync(async tx =>
@@ -319,6 +324,9 @@ public sealed class CallRuntime(
         var server = Safe.Text(payload, "server_call_id");
         if (server?.Length > 4096) throw new ControlException("INVALID_PROVIDER_HANDLE");
         if (call.Handle is not null && call.Handle.ConnectionId != connection)
+            throw new ControlException("PROVIDER_HANDLE_CONFLICT");
+        if (call.Handle?.ServerCallId is { } existingServer && server is not null && existingServer != server
+            || await tx.HandleBoundElsewhereAsync(call.State.CallId, connection, server))
             throw new ControlException("PROVIDER_HANDLE_CONFLICT");
         call.Handle = new ProviderHandle(connection, server ?? call.Handle?.ServerCallId);
         if (call.DispatchStatus == "none") call.DispatchStatus = "returned";

@@ -212,6 +212,10 @@ public sealed class StoreAndReplayTests
         const string privateDescription = "PRIVATE_APPROVAL_a6a2800af49d";
         const string privateTranscript = "PRIVATE_TRANSCRIPT_477939ad9816";
         const string privateSummary = "PRIVATE_SUMMARY_1d8b05b2cbbb";
+        const string privateFact = "PRIVATE_FACT_e9e4f25f0732";
+        const string privateCommitment = "PRIVATE_COMMITMENT_1db1ea184fab";
+        const string privateOutstanding = "PRIVATE_OUTSTANDING_887628745e99";
+        const string privateReference = "PRIVATE_REFERENCE_1c69bb0e04af";
         var receipt = await h.StartAsync(task: privateTask);
         await h.WaitStateAsync(receipt.CallId!, s => s.Lifecycle == "connected");
         var instruction = await h.CommandAsync("calls.instruct", receipt.CallId!, new JsonObject { ["text"] = privateInstruction });
@@ -227,14 +231,28 @@ public sealed class StoreAndReplayTests
             ["interrupted"] = false,
             ["delivery"] = "received"
         });
-        await h.ToolAsync(receipt.CallId!, "report_result", new JsonObject { ["outcome"] = "partial", ["summary"] = privateSummary });
+        await h.ToolAsync(receipt.CallId!, "report_result", new JsonObject
+        {
+            ["outcome"] = "partial",
+            ["summary"] = privateSummary,
+            ["facts"] = new JsonArray(privateFact),
+            ["commitments"] = new JsonArray(privateCommitment),
+            ["outstanding_items"] = new JsonArray(privateOutstanding),
+            ["source_references"] = new JsonArray(privateReference)
+        });
         await Harness.EventuallyAsync(async () => (await h.Runtime.EventsAsync(h.Owner, receipt.CallId!)).Events.Any(e => e.Type == "summary.ready"));
+        var summary = Assert.Single((await h.Runtime.EventsAsync(h.Owner, receipt.CallId!)).Events, e => e.Type == "summary.ready");
+        Assert.Equal(privateFact, summary.Payload["facts"]![0]!.GetValue<string>());
+        Assert.Equal(privateCommitment, summary.Payload["commitments"]![0]!.GetValue<string>());
+        Assert.Equal(privateOutstanding, summary.Payload["outstanding_items"]![0]!.GetValue<string>());
+        Assert.Equal(privateReference, summary.Payload["source_references"]![0]!.GetValue<string>());
         await h.CommandAsync("calls.stop", receipt.CallId!);
         await h.WaitStateAsync(receipt.CallId!, s => s.Lifecycle == "ended");
         foreach (var path in Directory.GetFiles(h.DirectoryPath))
         {
             var content = Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path));
-            foreach (var secret in new[] { privateTask, privateInstruction, privateDescription, privateTranscript, privateSummary })
+            foreach (var secret in new[] { privateTask, privateInstruction, privateDescription, privateTranscript,
+                privateSummary, privateFact, privateCommitment, privateOutstanding, privateReference })
                 Assert.DoesNotContain(secret, content);
         }
         using var fresh = new ControlStore(h.Settings, h.Clock);
@@ -266,6 +284,9 @@ public sealed class StoreAndReplayTests
     [Theory]
     [InlineData("command.json")]
     [InlineData("event.json")]
+    [InlineData("receipt.json")]
+    [InlineData("state.json")]
+    [InlineData("approval.json")]
     public async Task SharedFixturesDeserializeAndReserializeWithTheAuthoritativeContracts(string filename)
     {
         var text = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "fixtures", filename));
@@ -279,7 +300,7 @@ public sealed class StoreAndReplayTests
             Assert.Equal(Protocol.Version, command.SchemaVersion);
             CommandValidation.Validate(roundtrip);
         }
-        else
+        else if (filename == "event.json")
         {
             var envelope = JsonSerializer.Deserialize<EventEnvelope>(text, Protocol.Json)!;
             var roundtrip = JsonSerializer.Deserialize<EventEnvelope>(JsonSerializer.Serialize(envelope, Protocol.Json), Protocol.Json)!;
@@ -288,6 +309,27 @@ public sealed class StoreAndReplayTests
             Assert.Equal(envelope.CallId, roundtrip.CallId);
             Assert.Equal(Safe.Canonical(envelope.Payload), Safe.Canonical(roundtrip.Payload));
             Assert.Equal(Protocol.Version, envelope.SchemaVersion);
+        }
+        else if (filename == "receipt.json")
+        {
+            var receipt = JsonSerializer.Deserialize<CommandReceipt>(text, Protocol.Json)!;
+            var roundtrip = JsonSerializer.Deserialize<CommandReceipt>(JsonSerializer.Serialize(receipt, Protocol.Json), Protocol.Json)!;
+            Assert.Equal(receipt with { Result = null }, roundtrip with { Result = null });
+            Assert.Equal(Safe.Canonical(receipt.Result), Safe.Canonical(roundtrip.Result));
+            Assert.Equal(Protocol.Version, receipt.SchemaVersion);
+        }
+        else if (filename == "state.json")
+        {
+            var state = JsonSerializer.Deserialize<CallState>(text, Protocol.Json)!;
+            var roundtrip = JsonSerializer.Deserialize<CallState>(JsonSerializer.Serialize(state, Protocol.Json), Protocol.Json)!;
+            Assert.Equal(state, roundtrip);
+        }
+        else
+        {
+            var approval = JsonSerializer.Deserialize<ApprovalView>(text, Protocol.Json)!;
+            var roundtrip = JsonSerializer.Deserialize<ApprovalView>(JsonSerializer.Serialize(approval, Protocol.Json), Protocol.Json)!;
+            Assert.Equal(approval with { MaterialTerms = null }, roundtrip with { MaterialTerms = null });
+            Assert.Equal(Safe.Canonical(approval.MaterialTerms), Safe.Canonical(roundtrip.MaterialTerms));
         }
     }
 }

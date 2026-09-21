@@ -4,9 +4,10 @@ Give an AI assistant a phone task, then follow, steer, or end its call from your
 terminal. tpcli uses **Teams Phone** for the phone call and **Azure Voice Live**
 for the assistant's spoken conversation.
 
-**Development preview:** live calling is currently gated while authenticated media
-support is completed. The examples below show intended usage after the remaining
-readiness gates are resolved; the local simulation never places a real call.
+**Development preview:** the local system and real Azure adapters are implemented,
+but live calling still requires deployment and readiness verification. The examples
+below show intended usage after those gates are resolved; the local simulation
+never places a real call.
 
 **Give a task -> let the assistant call and converse -> review the result.**
 

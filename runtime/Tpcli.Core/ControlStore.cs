@@ -60,6 +60,8 @@ public sealed class ControlStore(RuntimeSettings settings, TimeProvider clock) :
             }
             var unit = new ControlTransaction(connection, transaction, now, cancellationToken);
             var result = await operation(unit);
+            await unit.FinalizeTerminalEventsAsync();
+            await unit.RevokeUnavailableMediaGrantsAsync();
             await transaction.CommitAsync(cancellationToken);
             return result;
         }
@@ -118,6 +120,9 @@ public sealed class ControlStore(RuntimeSettings settings, TimeProvider clock) :
             id TEXT PRIMARY KEY, tenant TEXT NOT NULL, principal TEXT NOT NULL, profile TEXT NOT NULL,
             status TEXT NOT NULL, lease_expires_ms BIGINT NOT NULL, connection_id TEXT NULL);
         CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, lease_expires_ms BIGINT NOT NULL);
+        CREATE TABLE IF NOT EXISTS owner_generations (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            generation BIGINT NOT NULL, connection_id TEXT NULL);
         CREATE TABLE IF NOT EXISTS calls (
             id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), tenant TEXT NOT NULL,
             principal TEXT NOT NULL, profile TEXT NOT NULL, worker_id TEXT NOT NULL, fence BIGINT NOT NULL,
@@ -127,6 +132,15 @@ public sealed class ControlStore(RuntimeSettings settings, TimeProvider clock) :
             last_sequence BIGINT NOT NULL);
         CREATE UNIQUE INDEX IF NOT EXISTS one_active_call ON calls(tenant, principal, profile) WHERE active=1;
         CREATE INDEX IF NOT EXISTS calls_session ON calls(session_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS calls_connection ON calls(connection_id) WHERE connection_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS calls_server_call ON calls(server_call_id) WHERE server_call_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS media_grants (
+            call_id TEXT PRIMARY KEY REFERENCES calls(id) ON DELETE CASCADE,
+            session_id TEXT NOT NULL, tenant TEXT NOT NULL, principal TEXT NOT NULL,
+            worker_id TEXT NOT NULL, worker_fence BIGINT NOT NULL, owner_generation BIGINT NOT NULL,
+            digest TEXT UNIQUE NOT NULL, origin TEXT NOT NULL, path TEXT NOT NULL,
+            issued_ms BIGINT NOT NULL, expires_ms BIGINT NOT NULL,
+            consumed_ms BIGINT NULL, revoked_ms BIGINT NULL);
         CREATE TABLE IF NOT EXISTS commands (
             id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
             call_id TEXT NULL REFERENCES calls(id) ON DELETE CASCADE, tenant TEXT NOT NULL,
@@ -170,11 +184,13 @@ public sealed class ControlStore(RuntimeSettings settings, TimeProvider clock) :
         """;
 }
 
-public sealed class ControlTransaction
+public sealed partial class ControlTransaction
 {
     private readonly DbConnection connection;
     private readonly DbTransaction transaction;
     private readonly CancellationToken cancellationToken;
+    private readonly Dictionary<string, List<CallRecord>> eventCalls = [];
+    private readonly List<(string CallId, long Sequence, JsonObject Payload)> terminalSnapshots = [];
     public DateTimeOffset Now { get; }
 
     internal ControlTransaction(DbConnection connection, DbTransaction transaction,
@@ -230,12 +246,17 @@ public sealed class ControlTransaction
     private static SessionRecord ReadSession(DbDataReader reader) =>
         new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
             reader.GetString(4), Time(reader, 5), Text(reader, 6));
-    public Task<int> SaveSessionAsync(SessionRecord session) => ExecuteAsync("""
+    public async Task<int> SaveSessionAsync(SessionRecord session)
+    {
+        var saved = await ExecuteAsync("""
         INSERT INTO sessions(id,tenant,principal,profile,status,lease_expires_ms,connection_id)
         VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6)
         ON CONFLICT(id) DO UPDATE SET status=excluded.status,lease_expires_ms=excluded.lease_expires_ms,connection_id=excluded.connection_id
         """, session.Id, session.Tenant, session.Principal, session.Profile, session.Status,
         session.LeaseExpiresAt.ToUnixTimeMilliseconds(), session.ConnectionId);
+        await SyncOwnerGenerationAsync(session);
+        return saved;
+    }
     public Task<int> HeartbeatWorkerAsync(string workerId) => ExecuteAsync("""
         INSERT INTO workers(id,lease_expires_ms) VALUES(@p0,@p1)
         ON CONFLICT(id) DO UPDATE SET lease_expires_ms=excluded.lease_expires_ms
@@ -267,13 +288,19 @@ public sealed class ControlTransaction
     };
     public async Task<CallRecord?> CallAsync(string callId) =>
         (await QueryAsync(CallSelect + " WHERE id=@p0", ReadCall, callId)).SingleOrDefault();
+    public async Task<bool> HandleBoundElsewhereAsync(string callId, string connectionId, string? serverCallId) =>
+        (await QueryAsync("""
+            SELECT id FROM calls WHERE id<>@p0 AND (connection_id=@p1 OR server_call_id=@p2) LIMIT 1
+            """, r => r.GetString(0), callId, connectionId, serverCallId)).Count != 0;
     public Task<List<CallRecord>> ActiveCallsAsync() => QueryAsync(CallSelect + " WHERE active=1", ReadCall);
     public Task<List<CallRecord>> SessionCallsAsync(string sessionId) =>
         QueryAsync(CallSelect + " WHERE session_id=@p0 ORDER BY id", ReadCall, sessionId);
     public async Task<bool> HasActiveCallAsync(Caller caller, string profile) =>
         (await QueryAsync("SELECT id FROM calls WHERE tenant=@p0 AND principal=@p1 AND profile=@p2 AND active=1",
             r => r.GetString(0), caller.Tenant, caller.Principal, profile)).Count != 0;
-    public Task<int> SaveCallAsync(CallRecord call) => ExecuteAsync("""
+    public async Task<int> SaveCallAsync(CallRecord call)
+    {
+        var saved = await ExecuteAsync("""
         INSERT INTO calls(id,session_id,tenant,principal,profile,worker_id,fence,dispatch_status,connection_id,
         server_call_id,conversation_version,completed_ms,last_termination_ms,state_json,active,deadline_ms,last_sequence)
         VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16)
@@ -287,6 +314,10 @@ public sealed class ControlTransaction
         call.ConversationVersion, call.CompletedAt?.ToUnixTimeMilliseconds(),
         call.LastTerminationAt?.ToUnixTimeMilliseconds(), Serialize(call.State), call.Active ? 1 : 0,
         call.State.Deadline.ToUnixTimeMilliseconds(), call.State.LastSequence);
+        if (!MediaCallActive(call))
+            await RevokeMediaGrantAsync(call.State.CallId);
+        return saved;
+    }
 
     public async Task<CallRecord> OwnedCallAsync(Caller caller, string id, string? sessionId = null)
     {
@@ -377,8 +408,34 @@ public sealed class ControlTransaction
             VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7)
             """, call.State.CallId, envelope.Sequence, envelope.EventId, envelope.SessionId,
             Now.ToUnixTimeMilliseconds(), type, commandId, durable ? Serialize(payload) : null);
+        if (!eventCalls.TryGetValue(call.State.CallId, out var records))
+            eventCalls.Add(call.State.CallId, records = []);
+        records.Add(call);
+        if (durable && payload["state"] is JsonObject state
+            && Safe.Text(state, "lifecycle") is "ended" or "failed_before_connect" or "termination_unknown")
+            terminalSnapshots.Add((call.State.CallId, envelope.Sequence, payload));
         await SaveCallAsync(call);
         return envelope;
+    }
+    internal async Task FinalizeTerminalEventsAsync()
+    {
+        foreach (var callId in eventCalls.Keys.ToArray())
+        {
+            var call = (await CallAsync(callId))!;
+            if (!Safe.HasResult(call.State)) continue;
+            var tail = (await EventsAsync(callId, call.State.LastSequence - 1, 1)).Single();
+            if (tail.Type != "call.result") await EmitStateAsync(call, "call.result");
+            // A broker may see the first terminal snapshot before the transaction's final
+            // result. Advertise that final cursor so calls wait drains the complete result.
+            foreach (var snapshot in terminalSnapshots.Where(snapshot => snapshot.CallId == callId))
+            {
+                snapshot.Payload["state"]!.AsObject()["last_sequence"] = call.State.LastSequence;
+                await ExecuteAsync("UPDATE events SET payload_json=@p0 WHERE call_id=@p1 AND sequence=@p2",
+                    Serialize(snapshot.Payload), callId, snapshot.Sequence);
+            }
+            foreach (var record in eventCalls[callId])
+                record.State = record.State with { LastSequence = call.State.LastSequence };
+        }
     }
     public Task<List<StoredEvent>> EventsAsync(string callId, long after, int limit = 128) =>
         QueryAsync("""

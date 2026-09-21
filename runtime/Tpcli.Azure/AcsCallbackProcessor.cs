@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Azure.Communication.CallAutomation;
@@ -19,19 +18,26 @@ internal sealed class AcsCallbackProcessor(
     {
         if (!AzureValidation.IsCallId(callId) || body.Length is 0 or > 262_144)
             throw new ProviderException("CALLBACK_INVALID");
-        var token = await authentication.AuthenticateAsync(authorization, cancellationToken).ConfigureAwait(false);
+        await authentication.AuthenticateAsync(authorization, cancellationToken).ConfigureAwait(false);
+        using var document = ParseDocument(body);
         CloudEvent[] events;
         try { events = CloudEvent.ParseMany(new BinaryData(body)); }
         catch (Exception) { throw new ProviderException("CALLBACK_INVALID"); }
         if (events.Length is < 1 or > 16)
             throw new ProviderException("CALLBACK_INVALID");
-        replay.BindToken(token, body);
-        foreach (var cloudEvent in events)
+        var eventBodies = document.RootElement.ValueKind == JsonValueKind.Array
+            ? document.RootElement.EnumerateArray().ToArray()
+            : [document.RootElement];
+        if (eventBodies.Length != events.Length)
+            throw new ProviderException("CALLBACK_INVALID");
+        for (var index = 0; index < events.Length; index++)
         {
+            var cloudEvent = events[index];
             if (string.IsNullOrEmpty(cloudEvent.Id) || cloudEvent.Id.Length > 1024 ||
                 cloudEvent.Time is not { } timestamp || timestamp > clock.GetUtcNow().AddSeconds(30) ||
                 !cloudEvent.Type.StartsWith("Microsoft.Communication.", StringComparison.Ordinal))
                 throw new ProviderException("CALLBACK_INVALID");
+            var fingerprint = CanonicalEventBody(eventBodies[index]);
             CallAutomationEventBase parsed;
             try { parsed = CallAutomationEventParser.Parse(cloudEvent); }
             catch (Exception) { throw new ProviderException("CALLBACK_INVALID"); }
@@ -41,7 +47,6 @@ internal sealed class AcsCallbackProcessor(
             if (!await correlate(callId, parsed.CallConnectionId, parsed.ServerCallId, cancellationToken).ConfigureAwait(false))
                 throw new ProviderException("CALLBACK_CORRELATION_REJECTED");
             var eventKey = callId + ":" + cloudEvent.Id;
-            var fingerprint = Encoding.UTF8.GetBytes(cloudEvent.Type + "\n" + cloudEvent.Data);
             if (replay.BeginEvent(eventKey, fingerprint) == ReplayDisposition.Duplicate)
                 continue;
             try
@@ -68,6 +73,49 @@ internal sealed class AcsCallbackProcessor(
                 replay.Retry(eventKey);
                 throw;
             }
+        }
+    }
+
+    private static JsonDocument ParseDocument(byte[] body)
+    {
+        try { return JsonDocument.Parse(body); }
+        catch (JsonException) { throw new ProviderException("CALLBACK_INVALID"); }
+    }
+
+    private static byte[] CanonicalEventBody(JsonElement value)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+            WriteCanonical(writer, value);
+        return buffer.ToArray();
+    }
+
+    private static void WriteCanonical(Utf8JsonWriter writer, JsonElement value)
+    {
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                writer.WriteStartObject();
+                string? previousName = null;
+                foreach (var property in value.EnumerateObject().OrderBy(p => p.Name, StringComparer.Ordinal))
+                {
+                    if (property.Name == previousName)
+                        throw new ProviderException("CALLBACK_INVALID");
+                    previousName = property.Name;
+                    writer.WritePropertyName(property.Name);
+                    WriteCanonical(writer, property.Value);
+                }
+                writer.WriteEndObject();
+                break;
+            case JsonValueKind.Array:
+                writer.WriteStartArray();
+                foreach (var item in value.EnumerateArray())
+                    WriteCanonical(writer, item);
+                writer.WriteEndArray();
+                break;
+            default:
+                value.WriteTo(writer);
+                break;
         }
     }
 

@@ -46,6 +46,23 @@ service-number readiness assertions, Voice Live endpoint/model/version/voice, an
 the relevant managed identity. Callback/media ingress must be authenticated as
 documented; an opaque call ID or a public tunnel is not authentication.
 
+The approved ACS media path uses a disposable application capability in the media
+WebSocket URL. The runtime stores only its digest and authority bindings in the
+shared control database; the watchdog can revoke unused authority through the
+same lease/fence state. No cloud API key or long-lived credential belongs in a URL.
+The SDK's create-time media URL cannot be replaced after connection, so the setup
+grant defaults to 90 seconds, is configurable from 5 to 120 seconds using
+`Azure__Media__SetupGrantTtlSeconds`, and is capped by the call deadline. It is
+single-use and cannot be renewed; failed or slow setup does not trigger a redial.
+
+Before setting `Azure__Media__UrlLoggingVerified=true` and the expiring
+`Azure__Media__UrlLoggingValidUntilUtc` attestation, inspect every ingress,
+proxy/WAF, SDK, access/error log, trace/APM exporter and diagnostic sink. Prove that
+URLs/query strings and payloads are absent on both successful and rejected paths.
+Application redaction alone cannot sanitize logs taken before the request reaches
+the worker. The template intentionally does not attest to infrastructure it has
+not inspected or set these flags for the operator.
+
 Configure Entra tenant, audience, and the `tpcli.control` delegated runtime
 permission. Runtime identities must have separately approved minimum ACS /
 Voice Live / Key Vault / registry access. Do not give the runtime tenant

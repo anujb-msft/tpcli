@@ -27,8 +27,9 @@ export ASPNETCORE_URLS=http://127.0.0.1:5080
 dotnet run --project runtime/Tpcli.Runtime --no-build
 ```
 
-Supply `Authorization: Bearer <injected-token>` on every `/v1` request, the
-owning WebSocket handshake, and fake signal injection. No token is returned or
+Send the injected bearer credential in the Authorization header on every
+`/v1` request, the owning WebSocket handshake, and fake signal injection.
+No credential is returned or
 printed. Fake HTTP refuses non-loopback listeners, non-loopback peers/Host
 headers, and HTTPS configuration. Its source/mode is `local-fake`, its route is
 `simulation`, and it never proves Azure readiness.
@@ -92,10 +93,17 @@ Tool signals use
 `{ "tool_call_id": "...", "name": "...", "arguments": { ... } }`:
 
 - `request_approval`: `action`, `description`, and object `material_terms`.
-- `send_dtmf`: `digits`, restricted to 1–32 of `0-9 A-D * #`.
+- `send_dtmf`: `digits`, restricted to 1–32 of `0-9 * #`.
 - `report_result`: `outcome` (`completed`, `partial`, `not_completed`, or
-  `unknown`) and optional `summary`. `task_outcome` is also accepted.
+  `unknown`) and optional nonblank `summary`. `task_outcome` is also accepted.
+  Optional string arrays `facts`, `commitments`, `outstanding_items`, and
+  `source_references` accompany the summary in the bounded volatile
+  `summary.ready` event only, never the durable control store.
 - `end_call`: ends the transport; it never invents a completed task result.
+  Optional `reason` preserves safe codes `task_finished`, `recipient_objection`,
+  `voicemail_not_allowed`, or `no_authorized_path`. Objection/disallowed-voicemail
+  aliases are normalized; unknown model text maps to `agent_ended`, never raw
+  text or an operator/owner-loss claim.
 
 Unknown tools cannot execute actions. Tool IDs and canonical argument hashes
 are deduplicated durably. Pending approval hashes bind canonical action,
@@ -135,6 +143,13 @@ producer. Lost/acknowledged/evicted volatile rows replay as `transcript.gap`
 with `from_sequence`, `to_sequence`, and `volatile_content_unavailable`.
 No missing content is fabricated.
 
+Terminal/uncertain-result snapshots advertise the sequence of the transaction's final
+`call.result`, including preceding command/approval resolution events. This
+cursor can exceed the snapshot envelope's own sequence: a waiting broker must
+drain through it before treating the terminal result as fully persisted.
+`termination_unknown` has a result for waiting clients but still occupies the
+active-call slot and remains eligible for safe watchdog termination retries.
+
 All queries and controls check tenant/principal/session ownership. A revoked
 owner may inspect results and recover an existing idempotent receipt but
 cannot create a new call under that session. A `termination_unknown` call
@@ -153,6 +168,41 @@ Ownership/fence/deadline are checked immediately before provider actions.
 Receipt and dispatch intent precede create; ambiguous creates are never
 redialed. A returned/late provider handle is retained even after owner loss,
 then terminated. Recovery is termination, not conversation reconstruction.
+
+The runtime implements the Azure adapter's `IAzureCallCorrelation` boundary
+using `DurableCallCorrelation`, without changing the shared provider contracts.
+It atomically binds opaque connection/server-call IDs only to existing Azure
+calls with durable dispatch intent, rejects replacement/cross-call bindings,
+and preserves matches after worker restart or owner revocation. Binding never
+revives an ended call. The watchdog does not expose callback ingress.
+
+`DurableMediaGrants` implements the separate `IAzureMediaGrantStore` boundary.
+Media authority is stricter than callback reconciliation: it requires the
+current worker/fence, owner connection generation, live owner and worker leases,
+matching call/session/tenant/principal, a non-ending Azure call and its hard
+deadline. One digest-only grant per call is issued before dispatch; atomic
+consumption additionally requires durable dispatch intent. Expiry, owner loss,
+worker loss, fencing or termination revoke unused grants, with no reissue or
+reconnection. Additive metadata tables support existing control databases.
+
+The v0.4 `IAzureMediaGrantStore` adapter uses `DurableMediaGrants` and the same
+transaction/fencing mechanism. `owner_generations` records ownership changes;
+`media_grants` stores only the SHA-256 digest, call/session/tenant/principal,
+worker/fence/owner generation, origin/path audience, and issue/expiry/consume/
+revoke timestamps. The raw disposable bearer stays in the Azure adapter's RAM,
+never the control store. A grant is issued once per call, expires within 120
+seconds and the hard deadline, and has exactly one atomic consumer even across
+independent store clients. Expired, consumed, or revoked grants cannot be
+reissued to reconnect or resume a call.
+
+The worker identity comes from the server's `CallRuntime.WorkerId`, not an HTTP
+argument. Each operation rechecks the current live owner connection, ownership
+generation, worker lease/fence, call ownership, and non-ending lifecycle.
+Consumption also requires durable dispatch intent. The registered Azure
+adapter supplies its configured `Azure__CallAutomation__PublicBaseUrl` audience
+and exact `/azure/media/{call_id}` path; consumption must match the issued
+audience. A media request cannot establish a provider ID binding. Independent
+watchdog/control transactions revoke unused grants on expiry or authority loss.
 
 The store allowlists state/identity/route/deadline/lease/fence metadata,
 provider handles, command and payload hashes, approval hashes/status/actor,
@@ -188,11 +238,30 @@ supply a single-hop forwarded scheme/address, and application requests still
 must resolve to HTTPS. No arbitrary forwarded headers/networks are trusted.
 `/healthz` is unauthenticated process liveness only, not provider readiness.
 HTTP bodies are capped at 64 KiB and task/instruction UTF-8 content at 16 KiB.
-Framework request/query logging is disabled and error responses contain only
-sanitized codes. Database and provider credentials belong in deployment
-secrets, never public profiles.
+The Azure startup privacy filter removes media capability queries (including
+malformed and misdirected queries) from `QueryString`, parsed query collections,
+and `RawTarget` before runtime middleware. It scrubs URL-related activity tags
+and sets `Referrer-Policy: no-referrer`. Host postconfiguration prevents
+provider-specific verbose logging rules from re-enabling ASP.NET/Kestrel,
+HTTP/WebSocket transport, Azure SDK, or telemetry logger output. Error responses
+contain only sanitized codes; safe runtime diagnostics remain available.
+
+Application log filtering is **not** proof that a proxy, access-log collector,
+startup hook, automatic instrumenter, or external activity exporter is safe.
+No unverified URL-collecting instrumentation may be enabled. The adapter's
+expiring `Azure__Media__UrlLoggingVerified` /
+`Azure__Media__UrlLoggingValidUntilUtc` evidence remains a separate live-readiness
+gate, not an insecure logging bypass. Database and provider credentials belong
+in deployment secrets, never public profiles.
 
 Local tests are not G1–G3 deployment evidence. PostgreSQL schema/coordination
 is implemented, but exercising a hosted database, Azure authentication, live
 callbacks/media, licensing, or the Teams route requires separately authorized
 deployment tests.
+The Azure adapter requires the actual durable grant store and current media-URL
+logging evidence. Missing prerequisites remain explicit preflight failures;
+implementing application capabilities does not establish hosted readiness.
+When PSTN capability is blocked, start requests expose the first allowlisted
+blocked prerequisite code (configuration, source/evidence, media, or callback
+correlation) rather than masking it as generic unsupported PSTN. Provider
+diagnostic messages are not echoed, and no provider preparation occurs.

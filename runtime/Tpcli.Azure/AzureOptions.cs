@@ -9,6 +9,7 @@ public sealed class AzureOptions
     public AzureIdentityOptions Identity { get; set; } = new();
     public CallAutomationOptions CallAutomation { get; set; } = new();
     public VoiceLiveOptions VoiceLive { get; set; } = new();
+    public AzureMediaOptions Media { get; set; } = new();
     public AzureReadinessEvidence Evidence { get; set; } = new();
 }
 
@@ -36,6 +37,16 @@ public sealed class VoiceLiveOptions
     public string Voice { get; set; } = "";
     public string Locale { get; set; } = "";
     public string TranscriptionModel { get; set; } = "";
+}
+
+public sealed class AzureMediaOptions
+{
+    public int SetupGrantTtlSeconds { get; set; } = 90;
+    public bool UrlLoggingVerified { get; set; }
+    public DateTimeOffset? UrlLoggingValidUntilUtc { get; set; }
+
+    internal bool IsLoggingEvidenceCurrent(DateTimeOffset now) =>
+        UrlLoggingVerified && UrlLoggingValidUntilUtc > now && UrlLoggingValidUntilUtc <= now.AddDays(7);
 }
 
 // These are expiring operator attestations, not results of an automatic tenant audit.
@@ -104,6 +115,8 @@ internal static partial class AzureValidation
         Identity(options.Identity);
         Endpoint(options.CallAutomation.Endpoint, "communication.azure.com");
         Endpoint(options.CallAutomation.PublicBaseUrl);
+        if (options.Media.SetupGrantTtlSeconds is < 5 or > 120)
+            throw new ProviderException("MEDIA_GRANT_TTL_INVALID");
         if (!Guid.TryParse(options.CallAutomation.ResourceId, out _) ||
             !Guid.TryParse(options.CallAutomation.ResourceAccountObjectId, out _) ||
             !IsPhone(options.CallAutomation.TeamsServiceNumber))

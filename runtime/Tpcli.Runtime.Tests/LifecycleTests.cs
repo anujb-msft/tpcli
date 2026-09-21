@@ -7,6 +7,14 @@ namespace Tpcli.Runtime.Tests;
 
 public sealed class LifecycleTests
 {
+    [Theory]
+    [InlineData("MEDIA_AUTH_UNVERIFIED", "MEDIA_AUTH_UNVERIFIED")]
+    [InlineData("Provider exception with private diagnostic content", "PROVIDER_FAILURE")]
+    public void ProviderErrorCodesPreserveTheMediaAuthenticationGateWithoutExposingDiagnostics(string input, string expected)
+    {
+        Assert.Equal(expected, Safe.ProviderCode(input));
+    }
+
     [Fact]
     public async Task InjectedConnectionEnablesRealSimulatedControlAndDeduplicatesEffects()
     {

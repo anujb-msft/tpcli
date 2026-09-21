@@ -24,7 +24,7 @@ public sealed class VoiceTests
         var vad = Assert.IsType<AzureSemanticVadTurnDetection>(session.TurnDetection);
         Assert.False(vad.AutoTruncate);
         Assert.False(vad.InterruptResponse);
-        Assert.True(vad.CreateResponse);
+        Assert.False(vad.CreateResponse);
     }
 
     [Fact]
@@ -74,10 +74,63 @@ public sealed class VoiceTests
         Assert.Throws<ProviderException>(() => VoiceProtocol.ParseTool("end_call", """{"actor":"admin"}"""));
     }
 
+    [Theory]
+    [InlineData("task_finished")]
+    [InlineData("recipient_objection")]
+    [InlineData("voicemail_not_allowed")]
+    [InlineData("no_authorized_path")]
+    [InlineData("objection")]
+    [InlineData("disallowed_voicemail")]
+    [InlineData("voicemail_disallowed")]
+    [InlineData("other reason requiring safe runtime normalization")]
+    public void OptionalEndCallReasonIsForwardedForAuthoritativeRuntimeNormalization(string reason)
+    {
+        var arguments = new JsonObject { ["reason"] = reason }.ToJsonString();
+        Assert.Equal(reason, VoiceProtocol.ParseTool("end_call", arguments)["reason"]!.GetValue<string>());
+        var definition = VoiceProtocol.Configure(Fixture.Options().VoiceLive)["session"]!["tools"]!.AsArray()
+            .Single(tool => tool!["name"]!.GetValue<string>() == "end_call")!;
+        Assert.Empty(definition["parameters"]!["required"]!.AsArray());
+        Assert.Equal(4, definition["parameters"]!["properties"]!["reason"]!["enum"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void OptionalEndCallReasonCannotSmuggleActorOrNonStringValues()
+    {
+        Assert.Throws<ProviderException>(() => VoiceProtocol.ParseTool("end_call", """{"reason":123}"""));
+        Assert.Throws<ProviderException>(() => VoiceProtocol.ParseTool("end_call", """{"reason":null}"""));
+        Assert.Throws<ProviderException>(() => VoiceProtocol.ParseTool("end_call", """{"reason":"recipient_objection","actor":"operator"}"""));
+    }
+
+    [Theory]
+    [InlineData("a", 128, true)]
+    [InlineData("a", 129, false)]
+    [InlineData("\u00e9", 64, true)]
+    [InlineData("\u00e9", 65, false)]
+    [InlineData("\U0001f600", 32, true)]
+    [InlineData("\U0001f600", 33, false)]
+    public void ApprovalActionLimitIs128Utf8BytesNotCharacters(string unit, int repetitions, bool accepted)
+    {
+        var action = string.Concat(Enumerable.Repeat(unit, repetitions));
+        var arguments = new JsonObject
+        {
+            ["action"] = action,
+            ["description"] = "Book the slot",
+            ["material_terms"] = new JsonObject()
+        }.ToJsonString();
+        if (accepted)
+            Assert.Equal(action, VoiceProtocol.ParseTool("request_approval", arguments)["action"]!.GetValue<string>());
+        else
+            Assert.Equal("VOICE_TOOL_INVALID", Assert.Throws<ProviderException>(() =>
+                VoiceProtocol.ParseTool("request_approval", arguments)).Code);
+        var definition = VoiceProtocol.Configure(Fixture.Options().VoiceLive)["session"]!["tools"]!.AsArray()
+            .Single(tool => tool!["name"]!.GetValue<string>() == "request_approval")!;
+        Assert.Equal(128, definition["parameters"]!["properties"]!["action"]!["maxLength"]!.GetValue<int>());
+    }
+
     [Fact]
     public async Task InterruptionStopsAcsCancelsCorrectResponseTruncatesAndDropsStaleAudio()
     {
-        await using var h = new Harness();
+        await using var h = await Harness.CreateAsync();
         await h.Created();
         await h.Voice.HandleAsync(Fixture.Audio(new byte[1920]), CancellationToken.None);
         await h.Voice.HandleAsync(Transcript("response.audio_transcript.delta", "Hello there"), CancellationToken.None);
@@ -105,7 +158,7 @@ public sealed class VoiceTests
     [Fact]
     public async Task MissingCancellationAcknowledgementIsAnExplicitFailure()
     {
-        await using var h = new Harness();
+        await using var h = await Harness.CreateAsync();
         await h.Created();
         await h.Voice.HandleAsync(new JsonObject { ["type"] = "input_audio_buffer.speech_started" }, CancellationToken.None);
         await Fixture.WaitUntilAsync(() => h.Failures.Contains("VOICE_CANCEL_UNCONFIRMED"));
@@ -114,7 +167,7 @@ public sealed class VoiceTests
     [Fact]
     public async Task TranscriptArrivingAfterCancellationIsStillMarkedInterrupted()
     {
-        await using var h = new Harness();
+        await using var h = await Harness.CreateAsync();
         await h.Created();
         await h.Voice.HandleAsync(new JsonObject { ["type"] = "input_audio_buffer.speech_started" }, CancellationToken.None);
         await h.Voice.HandleAsync(Transcript("response.audio_transcript.done", "Late generated words"), CancellationToken.None);
@@ -126,7 +179,7 @@ public sealed class VoiceTests
     [Fact]
     public async Task NoActiveResponseRaceMustMatchTheClientCancelEvent()
     {
-        await using var h = new Harness();
+        await using var h = await Harness.CreateAsync();
         await h.Created();
         await h.Voice.HandleAsync(new JsonObject { ["type"] = "input_audio_buffer.speech_started" }, CancellationToken.None);
         var cancel = h.Transport.Sent.Single(x => x["type"]!.GetValue<string>() == "response.cancel");
@@ -145,7 +198,7 @@ public sealed class VoiceTests
     [Fact]
     public async Task TranscriptRevisionsDistinguishGeneratedFromAllAudioSent()
     {
-        await using var h = new Harness();
+        await using var h = await Harness.CreateAsync();
         await h.Created();
         await h.Voice.HandleAsync(Fixture.Audio(new byte[960]), CancellationToken.None);
         await h.Voice.HandleAsync(Transcript("response.audio_transcript.delta", "Hello"), CancellationToken.None);
@@ -167,7 +220,7 @@ public sealed class VoiceTests
     [Fact]
     public async Task RecipientFinalRevisesTheSameSegmentRatherThanAppendingADuplicate()
     {
-        await using var h = new Harness();
+        await using var h = await Harness.CreateAsync();
         await h.Voice.HandleAsync(Fixture.Event("conversation.item.input_audio_transcription.delta",
             ("item_id", JsonValue.Create("recipient-item")), ("delta", JsonValue.Create("We open"))), CancellationToken.None);
         var final = Fixture.Event("conversation.item.input_audio_transcription.completed",
@@ -183,7 +236,7 @@ public sealed class VoiceTests
     [Fact]
     public async Task ApprovalContinuesWithFunctionOutputOnceNotAnInventedAssistantMessage()
     {
-        await using var h = new Harness();
+        await using var h = await Harness.CreateAsync();
         await h.Created();
         var request = Fixture.Event("response.function_call_arguments.done",
             ("call_id", JsonValue.Create("tool-1")), ("name", JsonValue.Create("request_approval")),
@@ -201,6 +254,27 @@ public sealed class VoiceTests
         Assert.Equal("response.create", h.Transport.Sent.Last()["type"]!.GetValue<string>());
         Assert.Equal("VOICE_TOOL_ALREADY_COMPLETED", (await Assert.ThrowsAsync<ProviderException>(() =>
             h.Voice.CompleteToolAsync("tool-1", new JsonObject { ["approved"] = true }, CancellationToken.None))).Code);
+    }
+
+    [Fact]
+    public async Task EmptyPrewarmCannotSendTaskAudioResponsesInstructionsOrToolResults()
+    {
+        await using var h = new Harness();
+        await h.Voice.InitializeAsync(CancellationToken.None);
+        Fixture.AssertEmptyPrewarm(h.Transport);
+        await Assert.ThrowsAsync<ProviderException>(() => h.Voice.AppendAudioAsync([1, 2], CancellationToken.None));
+        await Assert.ThrowsAsync<ProviderException>(() => h.Voice.DiscloseAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<ProviderException>(() => h.Voice.InstructAsync("Authorized instruction", CancellationToken.None));
+        await Assert.ThrowsAsync<ProviderException>(() => h.Voice.CompleteToolAsync("tool", new JsonObject(), CancellationToken.None));
+        Assert.Equal("VOICE_PREWARM_NOT_EMPTY", (await Assert.ThrowsAsync<ProviderException>(() => h.Created())).Code);
+        Fixture.AssertEmptyPrewarm(h.Transport);
+        Assert.Empty(h.Signals);
+        Assert.Equal(0, h.Output.ReservedBytes);
+
+        await h.Voice.ActivateAsync(CancellationToken.None);
+        Assert.Single(h.Transport.Sent, x => x["type"]!.GetValue<string>() == "conversation.item.create");
+        Assert.True(h.Transport.Sent.Last()["session"]!["turn_detection"]!["create_response"]!.GetValue<bool>());
+        Assert.DoesNotContain(h.Transport.Sent, x => x["type"]!.GetValue<string>() == "response.create");
     }
 
     private static JsonObject Transcript(string type, string text) => Fixture.Event(type,
@@ -224,6 +298,14 @@ public sealed class VoiceTests
                 Clock, Output, Signals.Add,
                 _ => { StopMessages.Add(JsonNode.Parse(AcsMediaProtocol.StopAudio())!); return Task.CompletedTask; },
                 code => { Failures.Enqueue(code); return Task.CompletedTask; }, CancellationToken.None);
+        }
+        internal static async Task<Harness> CreateAsync()
+        {
+            var harness = new Harness();
+            await harness.Voice.InitializeAsync(CancellationToken.None);
+            await harness.Voice.ActivateAsync(CancellationToken.None);
+            harness.Transport.Sent.Clear();
+            return harness;
         }
         internal Task Created(string id = "response-1") =>
             Voice.HandleAsync(Fixture.Event("response.created", ("response", new JsonObject { ["id"] = id })), CancellationToken.None);

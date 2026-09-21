@@ -7,7 +7,7 @@ namespace Tpcli.Azure;
 
 internal interface ICallAutomationTransport
 {
-    Task<ProviderHandle> DialAsync(CallContext context, CancellationToken cancellationToken);
+    Task<ProviderHandle> DialAsync(CallContext context, MediaTransportGrant grant, CancellationToken cancellationToken);
     Task SendDtmfAsync(string connectionId, string recipient, string callId, string digits, CancellationToken cancellationToken);
     Task<TerminationEvidence> TerminateAsync(string connectionId, CancellationToken cancellationToken);
 }
@@ -31,7 +31,7 @@ internal sealed class CallAutomationTransport(
         }
     }
 
-    internal static CreateCallOptions BuildCreateOptions(CallContext context, CallAutomationOptions options)
+    internal static CreateCallOptions BuildCreateOptions(CallContext context, CallAutomationOptions options, MediaTransportGrant grant)
     {
         var recipient = AzureValidation.PstnTarget(context.Target);
         if (!Guid.TryParse(options.ResourceAccountObjectId, out _) || !AzureValidation.IsPhone(options.TeamsServiceNumber))
@@ -39,7 +39,6 @@ internal sealed class CallAutomationTransport(
         if (!AzureValidation.IsCallId(context.CallId))
             throw new ProviderException("INVALID_CALL_ID");
         var baseUri = AzureValidation.Endpoint(options.PublicBaseUrl);
-        var mediaUri = new UriBuilder(new Uri(baseUri, $"azure/media/{context.CallId}")) { Scheme = "wss", Port = -1 };
         return new CreateCallOptions(
             new CallInvite(new PhoneNumberIdentifier(recipient), null),
             new Uri(baseUri, $"azure/callbacks/{context.CallId}"))
@@ -48,7 +47,7 @@ internal sealed class CallAutomationTransport(
             OperationContext = context.CallId,
             MediaStreamingOptions = new MediaStreamingOptions(MediaStreamingAudioChannel.Unmixed)
             {
-                TransportUri = mediaUri.Uri,
+                TransportUri = grant.ForSdk(),
                 AudioFormat = AudioFormat.Pcm24KMono,
                 EnableBidirectional = true,
                 EnableDtmfTones = false,
@@ -57,11 +56,12 @@ internal sealed class CallAutomationTransport(
         };
     }
 
-    public async Task<ProviderHandle> DialAsync(CallContext context, CancellationToken cancellationToken)
+    public async Task<ProviderHandle> DialAsync(CallContext context, MediaTransportGrant grant, CancellationToken cancellationToken)
     {
-        var request = BuildCreateOptions(context, options.CallAutomation);
+        var request = BuildCreateOptions(context, options.CallAutomation, grant);
         var client = Client;
         AzureValidation.Deadline(context, clock);
+        if (clock.GetUtcNow() >= grant.ExpiresAt) throw new ProviderException("MEDIA_GRANT_EXPIRED");
         cancellationToken.ThrowIfCancellationRequested();
         try
         {

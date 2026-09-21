@@ -251,7 +251,6 @@ internal sealed class CallActor : IAsyncDisposable
                 TerminationEngine.FinalizeOutcome(call);
                 await tx.InvalidateApprovalsAsync(call);
                 await tx.EmitStateAsync(call, "call.failed");
-                await tx.EmitStateAsync(call, "call.result");
             }
             foreach (var command in await tx.PendingCommandsAsync(CallId))
             {
@@ -264,6 +263,7 @@ internal sealed class CallActor : IAsyncDisposable
                 await tx.SaveCommandAsync(command with { Receipt = receipt });
                 await tx.EmitReceiptAsync(call, receipt);
             }
+            if (Safe.Terminal(call.State)) await tx.EmitStateAsync(call, "call.result");
             return failure.Ambiguous || call.Handle is not null;
         });
         runtime.Journal.Notify(sessionId);
@@ -431,8 +431,18 @@ internal sealed class CallActor : IAsyncDisposable
                 if (outcome is not ("completed" or "partial" or "not_completed" or "unknown"))
                     throw new ControlException("INVALID_TASK_OUTCOME", 400);
                 var summary = Safe.Text(arguments, "summary");
+                if (string.IsNullOrWhiteSpace(summary)) summary = null;
                 if (summary is not null && Encoding.UTF8.GetByteCount(summary) > RuntimeSettings.MaxTaskBytes)
                     throw new ControlException("INVALID_SUMMARY", 400);
+                var structured = new JsonObject();
+                foreach (var field in new[] { "facts", "commitments", "outstanding_items", "source_references" })
+                {
+                    if (!arguments.TryGetPropertyValue(field, out var content)) continue;
+                    if (content is not JsonArray array
+                        || array.Any(item => item is not JsonValue value || !value.TryGetValue<string>(out _)))
+                        throw new ControlException("INVALID_RESULT_CONTENT", 400);
+                    structured[field] = content.DeepClone();
+                }
                 await runtime.Store.TransactionAsync(async tx =>
                 {
                     var call = await RequiredCallAsync(tx);
@@ -447,20 +457,22 @@ internal sealed class CallActor : IAsyncDisposable
                     {
                         await tx.GuardActionAsync(call, runtime.WorkerId, fence, connected: true);
                         call.State = call.State with { SummaryStatus = "complete" };
-                        return ("summary.ready", new JsonObject
+                        var content = new JsonObject
                         {
                             ["summary"] = summary,
                             ["task_outcome"] = outcome,
                             ["transcript_status"] = call.State.TranscriptStatus,
                             ["provider_mode"] = call.State.ProviderMode,
                             ["status"] = "complete"
-                        });
+                        };
+                        foreach (var field in structured) content[field.Key] = field.Value?.DeepClone();
+                        return ("summary.ready", content);
                     });
                 }
                 LaunchToolResponse(toolId, new JsonObject { ["recorded"] = true });
                 break;
             case "end_call":
-                await runtime.StopAsync(CallId, "task_finished");
+                await runtime.StopAsync(CallId, Safe.ModelEndReason(Safe.Text(arguments, "reason")));
                 break;
             default:
                 LaunchToolResponse(toolId, new JsonObject { ["error"] = "UNSUPPORTED_TOOL" });

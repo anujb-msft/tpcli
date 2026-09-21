@@ -13,6 +13,7 @@ public static class CoreServices
         services.AddSingleton(settings);
         services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<ControlStore>();
+        services.AddSingleton<DurableCallCorrelation>();
         services.AddSingleton<EventJournal>();
         services.AddSingleton<TerminationEngine>();
         if (settings.Mode == "local-fake")
@@ -26,6 +27,9 @@ public static class CoreServices
     public static IServiceCollection AddTpcliCallRuntime(this IServiceCollection services)
     {
         services.AddSingleton<CallRuntime>();
+        services.AddSingleton(provider => new DurableMediaGrants(
+            provider.GetRequiredService<ControlStore>(),
+            () => provider.GetRequiredService<CallRuntime>().WorkerId));
         services.AddSingleton<IProviderEventSink>(provider =>
             new DeferredSink(() => provider.GetRequiredService<CallRuntime>()));
         services.AddHostedService<RuntimeSupervisor>();

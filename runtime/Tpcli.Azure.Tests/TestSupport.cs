@@ -46,6 +46,11 @@ internal static class Fixture
             Locale = "en-US",
             TranscriptionModel = "gpt-4o-transcribe"
         },
+        Media = new()
+        {
+            UrlLoggingVerified = true,
+            UrlLoggingValidUntilUtc = (clock ?? TimeProvider.System).GetUtcNow().AddHours(1)
+        },
         Evidence = new()
         {
             ResourceAccountBound = true,
@@ -72,6 +77,51 @@ internal static class Fixture
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (!predicate()) await Task.Delay(5, timeout.Token);
+    }
+
+    internal static void AssertEmptyPrewarm(RecordingVoice voice)
+    {
+        var command = Assert.Single(voice.Sent);
+        Assert.Equal("session.update", command["type"]!.GetValue<string>());
+        Assert.False(command["session"]!["turn_detection"]!["create_response"]!.GetValue<bool>());
+        Assert.DoesNotContain(Context().Task, command.ToJsonString());
+    }
+
+    internal static AzureMediaGrantScope GrantScope =>
+        new(CallId, "session-test", Audience, ResourceAccount, "worker-test", 1, 1);
+
+    internal static MediaTransportGrant TransportGrant(TimeProvider? clock = null) =>
+        new(new Uri("https://runtime.example.invalid/"), "/azure/media/" + CallId,
+            Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32)),
+            (clock ?? TimeProvider.System).GetUtcNow().AddSeconds(90));
+
+    internal static AzureCallConnection Connection(RecordingVoice voice, FakeTelephony telephony, RecordingSink sink,
+        TestCorrelation? correlation = null, AzureCallRegistry? registry = null, TimeProvider? clock = null)
+    {
+        clock ??= TimeProvider.System;
+        var options = Options(clock);
+        return new AzureCallConnection(Context(clock), options, telephony, voice, sink,
+            (correlation ?? new TestCorrelation()).TryBindAsync, registry ?? new AzureCallRegistry(), clock,
+            new MediaGrantAuthentication(options, new MemoryGrantStore(clock), clock), GrantScope);
+    }
+
+    internal static DefaultHttpContext MediaRequest(MediaRequestCredential? credential, string correlation = "correlation-test")
+    {
+        var http = new DefaultHttpContext();
+        http.Request.Scheme = "https";
+        http.Request.Host = new HostString("runtime.example.invalid");
+        http.Request.Path = "/azure/media/" + CallId;
+        http.Request.Headers["x-ms-call-connection-id"] = ConnectionId;
+        http.Request.Headers["x-ms-call-correlation-id"] = correlation;
+        http.Features.Set(credential);
+        return http;
+    }
+
+    internal static async Task<AuthenticatedMedia> AuthorizeMediaAsync(AzureCallConnection connection, FakeTelephony telephony)
+    {
+        var identity = await connection.AuthenticateMediaAsync(MediaRequest(telephony.Credential), CancellationToken.None);
+        await connection.PrepareMediaAsync(identity, CancellationToken.None);
+        return identity;
     }
 }
 
@@ -114,8 +164,12 @@ internal sealed class FakeTelephony : ICallAutomationTransport
     internal int DialCount;
     internal int HangupCount;
     internal readonly ConcurrentQueue<string> Dtmf = new();
-    public Task<ProviderHandle> DialAsync(CallContext context, CancellationToken cancellationToken)
+    internal MediaRequestCredential? Credential;
+    internal Action<MediaTransportGrant>? GrantObserver;
+    public Task<ProviderHandle> DialAsync(CallContext context, MediaTransportGrant grant, CancellationToken cancellationToken)
     {
+        Credential = MediaGrantAuthentication.ParseCredential(grant.ForSdk().Query);
+        GrantObserver?.Invoke(grant);
         Interlocked.Increment(ref DialCount);
         return Task.FromResult(new ProviderHandle(Fixture.ConnectionId, "opaque-server"));
     }
@@ -139,9 +193,11 @@ internal sealed class RecordingVoice : IVoiceTransport, IVoiceTransportFactory
     internal readonly ConcurrentQueue<JsonObject> Sent = new();
     internal bool AutoConfigure = true;
     internal int ConnectCount;
+    internal Action? OnConnect;
     public Task<IVoiceTransport> ConnectAsync(CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref ConnectCount);
+        OnConnect?.Invoke();
         return Task.FromResult<IVoiceTransport>(this);
     }
 
@@ -169,11 +225,55 @@ internal sealed class RecordingVoice : IVoiceTransport, IVoiceTransportFactory
     }
 }
 
-internal sealed class TestMediaAuthentication : IMediaAuthentication
+internal sealed class MemoryGrantStore(TimeProvider clock) : IAzureMediaGrantStore
 {
-    public bool IsSupported => true;
-    public Task<AuthenticatedMedia> AuthenticateAsync(HttpContext context, string callId, CancellationToken cancellationToken) =>
-        Task.FromResult(new AuthenticatedMedia(callId, Fixture.ConnectionId, "correlation-test"));
+    private readonly object _gate = new();
+    internal AzureMediaGrantScope CurrentScope = Fixture.GrantScope;
+    internal bool OwnerValid = true;
+    internal bool WorkerValid = true;
+    internal bool Active = true;
+    internal DateTimeOffset Deadline = clock.GetUtcNow().AddMinutes(10);
+    internal GrantEntry? Entry;
+    internal int ConsumeAttempts;
+    internal sealed record GrantEntry(AzureMediaGrantScope Scope, string Digest, string Origin, string Path,
+        DateTimeOffset ExpiresAt, bool Consumed = false);
+
+    private bool Current(AzureMediaGrantScope scope) =>
+        scope == CurrentScope && OwnerValid && WorkerValid && Active && clock.GetUtcNow() < Deadline;
+
+    public Task<AzureMediaGrantScope?> CaptureScopeAsync(string callId, string sessionId, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+            return Task.FromResult(callId == CurrentScope.CallId && sessionId == CurrentScope.SessionId && Current(CurrentScope)
+                ? CurrentScope : null);
+    }
+
+    public Task<bool> TryIssueAsync(AzureMediaGrantScope scope, string digest, string origin, string path,
+        DateTimeOffset expiresAt, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            if (!Current(scope) || Entry is not null || expiresAt <= clock.GetUtcNow() ||
+                expiresAt > Deadline || expiresAt > clock.GetUtcNow().AddSeconds(120))
+                return Task.FromResult(false);
+            Entry = new(scope, digest, origin, path, expiresAt);
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<bool> TryConsumeAsync(AzureMediaGrantScope scope, string digest, string origin, string path,
+        CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            ConsumeAttempts++;
+            if (!Current(scope) || Entry is not { Consumed: false } entry || entry.Scope != scope ||
+                entry.Digest != digest || entry.Origin != origin || entry.Path != path || entry.ExpiresAt <= clock.GetUtcNow())
+                return Task.FromResult(false);
+            Entry = entry with { Consumed = true };
+            return Task.FromResult(true);
+        }
+    }
 }
 
 internal sealed class JwtFixture : IDisposable

@@ -8,7 +8,7 @@ internal sealed class AzureCallProviderFactory(
     AzureCredentials credentials,
     ICallAutomationTransport telephony,
     IVoiceTransportFactory voice,
-    IMediaAuthentication mediaAuthentication,
+    MediaGrantAuthentication mediaAuthentication,
     CallbackAuthentication callbackAuthentication,
     IProviderEventSink sink,
     IAzureCallCorrelation correlation,
@@ -38,16 +38,20 @@ internal sealed class AzureCallProviderFactory(
             evidenceCurrent
                 ? "Unexpired operator attestation supplied; this command has not audited tenant binding, number, licensing, permissions, or funding."
                 : "Supply current, independently verified resource-account binding, service number, resource-account license, server access, and outbound funding evidence."));
-        checks.Add(new("media_authentication", mediaAuthentication.IsSupported ? "pass" : "blocked",
-            mediaAuthentication.IsSupported ? "MEDIA_AUTH_CONFIGURED" : "MEDIA_AUTH_UNVERIFIED",
-            "Public ACS streaming documentation specifies correlation headers, not an established service-authenticated WebSocket handshake. Live mode is closed until this is resolved in code."));
+        checks.Add(new("media_authentication", mediaAuthentication.IsSupported ? "configured" : "blocked",
+            mediaAuthentication.IsSupported ? "MEDIA_APP_GRANT_CONFIGURED" : "MEDIA_GRANT_STORE_UNCONFIGURED",
+            "App-managed call-scoped single-use capability with durable atomic consumption; not ACS-issued service identity. Correlation headers are consistency checks only."));
+        var loggingVerified = options.Media.IsLoggingEvidenceCurrent(clock.GetUtcNow());
+        checks.Add(new("media_url_logging", loggingVerified ? "attested" : "blocked",
+            loggingVerified ? "MEDIA_URL_LOGGING_ATTESTED" : "MEDIA_URL_LOGGING_UNVERIFIED",
+            "Requires current independent proof that proxies/ingress/exporters omit capability URLs and unsupported automatic request instrumentation is disabled. Not an authentication bypass."));
         checks.Add(new("teams_direct", "blocked", "CAPABILITY_UNSUPPORTED",
             "Direct Teams calling plus Voice Live, source identity, supported clients, and tenant permissions remain an unproven preview combination. No PSTN substitution."));
         checks.Add(new("callback_correlation", correlation is UnavailableAzureCallCorrelation ? "blocked" : "configured",
             correlation is UnavailableAzureCallCorrelation ? "CALLBACK_CORRELATION_UNCONFIGURED" : "CALLBACK_CORRELATION_CONFIGURED",
             "The host must implement IAzureCallCorrelation using its durable dispatch/binding records; worker memory is not authoritative."));
         checks.Add(new("voice_access", "unknown", "VOICE_ACCESS_UNVERIFIED",
-            "Model, voice, region, service access, text summaries, and tool continuations require a separately authorized integration test. Doctor never opens a Voice Live session."));
+            "Actual authorized calls prewarm an empty VoiceLive session and require configuration acknowledgement before dialing. Doctor never opens a Voice Live session or proves deployment/media access."));
         checks.Add(new("live_validation", "unknown", "LIVE_VALIDATION_NOT_RUN",
             "Compilation and offline protocol tests do not establish a working deployment, G1-G4, or recipient-perceived latency."));
 
@@ -73,8 +77,8 @@ internal sealed class AzureCallProviderFactory(
             checks.Add(new("online_checks", "not_run", "OFFLINE_ONLY", "No network or credential acquisition was attempted."));
         }
         return new ProviderCapabilities(Mode,
-            configured && evidenceCurrent && mediaAuthentication.IsSupported && correlation is not UnavailableAzureCallCorrelation, false,
-            configured && mediaAuthentication.IsSupported,
+            configured && evidenceCurrent && mediaAuthentication.IsSupported && loggingVerified && correlation is not UnavailableAzureCallCorrelation, false,
+            configured && mediaAuthentication.IsSupported && loggingVerified,
             string.IsNullOrEmpty(options.CallAutomation.ResourceAccountObjectId)
                 ? "unconfigured"
                 : $"teams-resource-account:{options.CallAutomation.ResourceAccountObjectId}",
@@ -106,9 +110,10 @@ internal sealed class AzureCallProviderFactory(
         if (!AzureValidation.IsCallId(context.CallId))
             throw new ProviderException("INVALID_CALL_ID");
         AzureValidation.Configuration(options);
-        // Check before token acquisition or starting the potentially billable voice session.
+        // Require current authority and all gates before prewarming an empty voice session.
         if (!mediaAuthentication.IsSupported)
-            throw new ProviderException("MEDIA_AUTH_UNVERIFIED");
+            throw new ProviderException("MEDIA_GRANT_STORE_UNCONFIGURED");
+        mediaAuthentication.EnsureLoggingVerified();
         if (correlation is UnavailableAzureCallCorrelation)
             throw new ProviderException("CALLBACK_CORRELATION_UNCONFIGURED");
         if (!options.Evidence.IsCurrent(clock.GetUtcNow()))
@@ -116,8 +121,9 @@ internal sealed class AzureCallProviderFactory(
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp((context.Deadline - clock.GetUtcNow()).TotalSeconds, 0, 30)));
         AzureValidation.Deadline(context, clock);
-        var transport = await voice.ConnectAsync(timeout.Token).ConfigureAwait(false);
-        var connection = new AzureCallConnection(context, options, telephony, transport, sink, correlation.TryBindAsync, registry, clock);
+        var scope = await mediaAuthentication.CaptureScopeAsync(context, timeout.Token).ConfigureAwait(false);
+        var connection = new AzureCallConnection(context, options, telephony, voice, sink, correlation.TryBindAsync,
+            registry, clock, mediaAuthentication, scope);
         try
         {
             registry.Add(context.CallId, connection);
@@ -128,7 +134,7 @@ internal sealed class AzureCallProviderFactory(
         {
             await connection.DisposeAsync().ConfigureAwait(false);
             if (ex is ProviderException) throw;
-            throw new ProviderException("VOICE_INITIALIZATION_FAILED");
+            throw new ProviderException("PROVIDER_PREPARATION_FAILED");
         }
     }
 }

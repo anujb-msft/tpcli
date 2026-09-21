@@ -2,9 +2,12 @@ using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.HttpLogging;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Tpcli.Contracts;
 
 namespace Tpcli.Azure;
@@ -35,7 +38,8 @@ public static class AzureRegistration
         services.AddSingleton<AzureCredentials>();
         services.AddSingleton<ICallAutomationTransport, CallAutomationTransport>();
         services.AddSingleton<IVoiceTransportFactory, VoiceLiveTransportFactory>();
-        services.AddSingleton<IMediaAuthentication, UnverifiedMediaAuthentication>();
+        services.TryAddSingleton<IAzureMediaGrantStore, UnavailableAzureMediaGrantStore>();
+        services.AddSingleton<MediaGrantAuthentication>();
         services.AddSingleton(sp => new CallbackAuthentication(sp.GetRequiredService<AzureOptions>()));
         services.AddSingleton<CallbackReplayGuard>();
         services.AddSingleton<AzureCallRegistry>();
@@ -45,13 +49,16 @@ public static class AzureRegistration
         services.AddSingleton<ICallProviderFactory, AzureCallProviderFactory>();
         services.AddSingleton<ICallTerminator, AzureCallTerminator>();
         services.AddHttpLoggingInterceptor<AzurePrivacyLoggingInterceptor>();
+        services.AddLogging();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IPostConfigureOptions<LoggerFilterOptions>, AzurePrivacyLogFilters>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IStartupFilter, AzureMediaPrivacyFilter>());
         return services;
     }
 
     public static WebApplication MapTpcliAzureEndpoints(this WebApplication app)
     {
         app.UseWebSockets();
-        // These routes perform their own ACS authentication, not the CLI's Entra policy.
+        // Callbacks use ACS JWTs; media uses a consumed app grant, not CLI/ACS identity.
         app.MapPost("/azure/callbacks/{callId}", CallbackAsync).AllowAnonymous();
         app.MapGet("/azure/media/{callId}", MediaAsync).AllowAnonymous();
         return app;
@@ -59,7 +66,8 @@ public static class AzureRegistration
 
     private static async Task<IResult> CallbackAsync(HttpContext http, string callId, AcsCallbackProcessor processor)
     {
-        if (!http.Request.IsHttps || http.Request.QueryString.HasValue)
+        if (!http.Request.IsHttps || http.Request.QueryString.HasValue ||
+            http.Features.Get<AzureRedactedQuery>()?.HadQuery == true)
             return Error("CALLBACK_TRANSPORT_INVALID", StatusCodes.Status400BadRequest);
         try
         {
@@ -97,32 +105,32 @@ public static class AzureRegistration
         }
     }
 
-    private static async Task MediaAsync(HttpContext http, string callId, IMediaAuthentication authentication,
-        AzureCallRegistry registry)
+    internal static async Task MediaAsync(HttpContext http, string callId, AzureCallRegistry registry)
     {
+        AzureCallConnection? connection = null;
+        var authenticated = false;
         try
         {
             if (!http.Request.IsHttps || http.Request.QueryString.HasValue || !http.WebSockets.IsWebSocketRequest)
                 throw new ProviderException("MEDIA_TRANSPORT_INVALID");
-            // No key in a URL, callback JWT assumption, IP-only rule, or anonymous fallback.
-            var identity = await authentication.AuthenticateAsync(http, callId, http.RequestAborted).ConfigureAwait(false);
-            if (identity.CallId != callId ||
-                http.Request.Headers["x-ms-call-connection-id"].ToString() != identity.ConnectionId ||
-                http.Request.Headers["x-ms-call-correlation-id"].ToString() != identity.CorrelationId)
-                throw new ProviderException("MEDIA_CORRELATION_REJECTED");
-            var connection = registry.Find(callId) ?? throw new ProviderException("MEDIA_CALL_UNAVAILABLE");
+            connection = registry.Find(callId) ?? throw new ProviderException("MEDIA_CALL_UNAVAILABLE");
+            var identity = await connection.AuthenticateMediaAsync(http, http.RequestAborted).ConfigureAwait(false);
+            authenticated = true;
+            await connection.PrepareMediaAsync(identity, http.RequestAborted).ConfigureAwait(false);
             using var socket = await http.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
             await connection.RunMediaAsync(socket, identity, http.RequestAborted).ConfigureAwait(false);
         }
         catch (ProviderException ex)
         {
+            if (authenticated && connection is not null) await connection.MediaSetupFailedAsync().ConfigureAwait(false);
             if (!http.Response.HasStarted)
-                await Error(ex.Code, ex.Code == "MEDIA_AUTH_UNVERIFIED"
+                await Error(ex.Code, ex.Code is "MEDIA_GRANT_STORE_UNCONFIGURED" or "MEDIA_URL_LOGGING_UNVERIFIED" or "MEDIA_GRANT_STORE_UNAVAILABLE"
                     ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status403Forbidden).ExecuteAsync(http).ConfigureAwait(false);
             else http.Abort();
         }
         catch (Exception)
         {
+            if (authenticated && connection is not null) await connection.MediaSetupFailedAsync().ConfigureAwait(false);
             if (!http.Response.HasStarted)
                 await Error("MEDIA_UNAVAILABLE", StatusCodes.Status503ServiceUnavailable).ExecuteAsync(http).ConfigureAwait(false);
             else http.Abort();

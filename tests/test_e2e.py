@@ -576,7 +576,13 @@ class CrossProcessTests(unittest.TestCase):
         call = h.start(session)["call_id"]
         h.connected(call)
         summary = "Simulated opening hours were obtained; no booking or purchase was made."
-        h.tool(call, "report_result", {"outcome": "completed", "summary": summary})
+        collections = {
+            "facts": ["Synthetic public-hours fact: Monday to Friday, 09:00-17:00."],
+            "commitments": ["Synthetic commitment: none authorized or made."],
+            "outstanding_items": ["Synthetic outstanding item: weekend availability not confirmed."],
+            "source_references": ["Synthetic source reference: the simulated recipient's spoken answer."],
+        }
+        h.tool(call, "report_result", {"outcome": "completed", "summary": summary, **collections})
         eventually(lambda: h.state(call), lambda value: value["task_outcome"] == "completed")
         eventually(
             lambda: h.cli("history", "show", call),
@@ -591,14 +597,22 @@ class CrossProcessTests(unittest.TestCase):
             lambda value: value["summary"] is not None,
         )
         self.assertEqual(history["summary"]["summary"], summary)
+        for field, values in collections.items():
+            self.assertEqual(history["summary"][field], values)
         self.assertEqual(history["state"]["summary_status"], "complete")
         owner.stdin.close()
         owner.wait(timeout=8)
-        self.assertEqual(h.cli("history", "show", call)["summary"]["summary"], summary)
+        retained = h.cli("history", "show", call)["summary"]
+        self.assertEqual(retained["summary"], summary)
+        for field, values in collections.items():
+            self.assertEqual(retained[field], values)
+        private_text = [summary, *(value for values in collections.values() for value in values)]
         for path in h.root.glob("control.db*"):
-            self.assertNotIn(summary.encode(), path.read_bytes())
+            for text in private_text:
+                self.assertNotIn(text.encode(), path.read_bytes())
         for path in h.root.glob("*.log"):
-            self.assertNotIn(summary, path.read_text())
+            for text in private_text:
+                self.assertNotIn(text, path.read_text())
 
     def test_owner_loss_invalidates_approval_even_for_a_late_authenticated_client(self):
         h = self.harness()

@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
@@ -7,8 +6,6 @@ using Microsoft.IdentityModel.Tokens;
 using Tpcli.Contracts;
 
 namespace Tpcli.Azure;
-
-internal sealed record AuthenticatedCallback(string TokenHash, DateTimeOffset ExpiresAt);
 
 internal sealed class CallbackAuthentication
 {
@@ -42,7 +39,7 @@ internal sealed class CallbackAuthentication
             throw new ProviderException("CALLBACK_AUTH_METADATA_INVALID");
     }
 
-    internal async Task<AuthenticatedCallback> AuthenticateAsync(string authorization, CancellationToken cancellationToken)
+    internal async Task AuthenticateAsync(string authorization, CancellationToken cancellationToken)
     {
         if (authorization.Length > 16_384 || !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ||
             !Guid.TryParse(_audience, out _))
@@ -73,12 +70,8 @@ internal sealed class CallbackAuthentication
                         ClockSkew = TimeSpan.FromSeconds(30),
                         IncludeTokenOnFailedValidation = false
                     }).ConfigureAwait(false);
-                if (result.IsValid && result.SecurityToken is JsonWebToken jwt)
-                {
-                    return new AuthenticatedCallback(
-                        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token))),
-                        new DateTimeOffset(jwt.ValidTo, TimeSpan.Zero));
-                }
+                if (result.IsValid && result.SecurityToken is JsonWebToken)
+                    return;
                 if (attempt == 0 && result.Exception is SecurityTokenSignatureKeyNotFoundException)
                     _configuration.RequestRefresh();
                 else
@@ -95,28 +88,9 @@ internal enum ReplayDisposition { New, Duplicate }
 
 internal sealed class CallbackReplayGuard(TimeProvider clock, int capacity = 8192)
 {
-    private sealed record Entry(string Hash, DateTimeOffset ExpiresAt, bool Completed = false);
+    private sealed record Entry(string Hash, DateTimeOffset ExpiresAt, bool InProgress = true, bool Completed = false);
     private readonly object _gate = new();
-    private readonly Dictionary<string, Entry> _tokens = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Entry> _events = new(StringComparer.Ordinal);
-
-    internal void BindToken(AuthenticatedCallback token, ReadOnlySpan<byte> body)
-    {
-        var hash = Convert.ToHexString(SHA256.HashData(body));
-        lock (_gate)
-        {
-            Prune();
-            if (_tokens.TryGetValue(token.TokenHash, out var entry))
-            {
-                if (entry.Hash != hash)
-                    throw new ProviderException("CALLBACK_REPLAY_REJECTED");
-                return;
-            }
-            if (_tokens.Count >= capacity)
-                throw new ProviderException("CALLBACK_CAPACITY_EXCEEDED");
-            _tokens.Add(token.TokenHash, new Entry(hash, token.ExpiresAt.AddSeconds(30)));
-        }
-    }
 
     internal ReplayDisposition BeginEvent(string eventKey, ReadOnlySpan<byte> body)
     {
@@ -128,9 +102,12 @@ internal sealed class CallbackReplayGuard(TimeProvider clock, int capacity = 819
             {
                 if (entry.Hash != hash)
                     throw new ProviderException("CALLBACK_REPLAY_REJECTED");
-                if (!entry.Completed)
+                if (entry.Completed)
+                    return ReplayDisposition.Duplicate;
+                if (entry.InProgress)
                     throw new ProviderException("CALLBACK_RETRY_REQUIRED");
-                return ReplayDisposition.Duplicate;
+                _events[eventKey] = entry with { InProgress = true };
+                return ReplayDisposition.New;
             }
             if (_events.Count >= capacity)
                 throw new ProviderException("CALLBACK_CAPACITY_EXCEEDED");
@@ -144,7 +121,7 @@ internal sealed class CallbackReplayGuard(TimeProvider clock, int capacity = 819
         lock (_gate)
         {
             if (_events.TryGetValue(eventKey, out var entry))
-                _events[eventKey] = entry with { Completed = true };
+                _events[eventKey] = entry with { InProgress = false, Completed = true };
         }
     }
 
@@ -153,16 +130,14 @@ internal sealed class CallbackReplayGuard(TimeProvider clock, int capacity = 819
         lock (_gate)
         {
             if (_events.TryGetValue(eventKey, out var entry) && !entry.Completed)
-                _events.Remove(eventKey);
+                _events[eventKey] = entry with { InProgress = false };
         }
     }
 
     private void Prune()
     {
         var now = clock.GetUtcNow();
-        foreach (var key in _tokens.Where(p => p.Value.ExpiresAt < now).Select(p => p.Key).ToArray())
-            _tokens.Remove(key);
-        foreach (var key in _events.Where(p => p.Value.ExpiresAt < now && p.Value.Completed).Select(p => p.Key).ToArray())
+        foreach (var key in _events.Where(p => p.Value.ExpiresAt < now && !p.Value.InProgress).Select(p => p.Key).ToArray())
             _events.Remove(key);
     }
 }

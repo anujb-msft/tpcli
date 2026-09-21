@@ -1,4 +1,5 @@
 using System.Net;
+using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net.WebSockets;
@@ -20,6 +21,8 @@ internal sealed class ApiHarness : IAsyncDisposable
 {
     private readonly string directory = Path.Combine(AppContext.BaseDirectory, "test-data", Guid.NewGuid().ToString("N"));
     private readonly string token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+    private readonly ConcurrentBag<WebSocket> sockets = [];
+    private readonly ConcurrentDictionary<Guid, TaskCompletionSource> requests = new();
     public WebApplication Application { get; private set; } = null!;
     public HttpClient Client { get; private set; } = null!;
     public string DatabasePath => Path.Combine(directory, "api.db");
@@ -42,6 +45,18 @@ internal sealed class ApiHarness : IAsyncDisposable
             builder.Configuration.AddInMemoryCollection(settings);
             builder.WebHost.UseTestServer();
         });
+        Application.Use(async (context, next) =>
+        {
+            var id = Guid.NewGuid();
+            var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            requests[id] = finished;
+            try { await next(context); }
+            finally
+            {
+                requests.TryRemove(id, out _);
+                finished.TrySetResult();
+            }
+        });
         await Application.StartAsync();
         Client = NewClient();
     }
@@ -61,7 +76,9 @@ internal sealed class ApiHarness : IAsyncDisposable
     {
         var client = Application.GetTestServer().CreateWebSocketClient();
         if (authorized) client.ConfigureRequest = request => request.Headers.Authorization = "Bearer " + token;
-        return await client.ConnectAsync(new Uri("ws://localhost/v1/sessions/" + sessionId + "/control"), CancellationToken.None);
+        var socket = await client.ConnectAsync(new Uri("ws://localhost/v1/sessions/" + sessionId + "/control"), CancellationToken.None);
+        sockets.Add(socket);
+        return socket;
     }
     public static async Task<EventEnvelope> ReceiveAsync(WebSocket socket)
     {
@@ -95,6 +112,19 @@ internal sealed class ApiHarness : IAsyncDisposable
     {
         if (Application is not null)
         {
+            foreach (var socket in sockets)
+            {
+                if (socket.State is WebSocketState.Open or WebSocketState.CloseSent or WebSocketState.CloseReceived)
+                    socket.Abort();
+                socket.Dispose();
+            }
+            // TestServer disposal does not wait for a WebSocket handler's finally block.
+            // Its owner revocation must finish before disposing/deleting the control store.
+            using (var requestTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(6)))
+            {
+                while (!requests.IsEmpty)
+                    await Task.WhenAll(requests.Values.Select(request => request.Task)).WaitAsync(requestTimeout.Token);
+            }
             await Application.StopAsync();
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(6));
             await Application.Services.GetRequiredService<TerminationEngine>().DrainAsync(timeout.Token);

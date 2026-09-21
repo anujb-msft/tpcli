@@ -25,6 +25,7 @@ public static class CommandValidation
                 var target = RequiredText(payload, "target", 128);
                 if (!Safe.PstnTarget().IsMatch(target)
                     && !(target.StartsWith("teams:", StringComparison.Ordinal)
+                        && target.Length == 42
                         && Guid.TryParseExact(target[6..], "D", out _)))
                     throw new ControlException("INVALID_TARGET", 400);
                 RequiredText(payload, "task", RuntimeSettings.MaxTaskBytes);

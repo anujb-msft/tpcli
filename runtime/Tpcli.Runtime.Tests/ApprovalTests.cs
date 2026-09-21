@@ -6,6 +6,42 @@ namespace Tpcli.Runtime.Tests;
 
 public sealed class ApprovalTests
 {
+    [Theory]
+    [InlineData("recipient_objection", "recipient_objection")]
+    [InlineData("disallowed_voicemail", "voicemail_not_allowed")]
+    [InlineData("no_authorized_path", "no_authorized_path")]
+    [InlineData("task_finished", "task_finished")]
+    [InlineData("PRIVATE_MODEL_REASON_NOT_FOR_CONTROL_STORAGE", "agent_ended")]
+    [InlineData(null, "task_finished")]
+    public async Task EndToolPreservesOnlySafeReasonsAndNeverCompletesTheTask(string? reason, string expected)
+    {
+        await using var h = new Harness();
+        await h.InitializeAsync();
+        var receipt = await h.StartAsync();
+        await h.WaitStateAsync(receipt.CallId!, state => state.Lifecycle == "connected");
+        await h.ToolAsync(receipt.CallId!, "end_call",
+            reason is null ? [] : new JsonObject { ["reason"] = reason });
+        var state = await h.WaitStateAsync(receipt.CallId!, Safe.Terminal);
+        Assert.Equal(expected, state.TerminationReason);
+        Assert.Equal("not_completed", state.TaskOutcome);
+        Assert.Equal("confirmed", state.HangupStatus);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task BlankSummaryIsUnavailableRatherThanACompletedSummary(string summary)
+    {
+        await using var h = new Harness();
+        await h.InitializeAsync();
+        var receipt = await h.StartAsync();
+        await h.WaitStateAsync(receipt.CallId!, s => s.Lifecycle == "connected");
+        await h.ToolAsync(receipt.CallId!, "report_result", new JsonObject { ["outcome"] = "completed", ["summary"] = summary });
+        var state = await h.WaitStateAsync(receipt.CallId!, s => s.TaskOutcome == "completed");
+        Assert.Equal("unavailable", state.SummaryStatus);
+        Assert.DoesNotContain((await h.Runtime.EventsAsync(h.Owner, receipt.CallId!)).Events, e => e.Type == "summary.ready");
+    }
+
     [Fact]
     public async Task ExactHashOneTimeConsumptionAndPrincipalAreEnforced()
     {
