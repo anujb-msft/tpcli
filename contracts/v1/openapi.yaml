@@ -1,0 +1,108 @@
+openapi: 3.1.0
+info:
+  title: tpcli session control API
+  version: 1.0.0
+  description: >
+    Mutations return receipts, not evidence of connection or task completion.
+    Bearer authentication is required on every v1 endpoint. Content is never
+    written to the durable server control store. See protocol.schema.json.
+security:
+  - entra: []
+paths:
+  /v1/capabilities:
+    get:
+      operationId: capabilities
+      parameters:
+        - {name: online, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200': {description: Capabilities and non-dialing readiness checks}
+  /v1/sessions:
+    post:
+      operationId: createSession
+      responses:
+        '201': {description: Session routing ID and initial lease; no call placed}
+  /v1/sessions/{session_id}:
+    parameters:
+      - {$ref: '#/components/parameters/session'}
+    delete:
+      operationId: revokeSession
+      responses:
+        '200': {description: Scope revoked; hangup initiation is not confirmation}
+  /v1/sessions/{session_id}/control:
+    parameters:
+      - {$ref: '#/components/parameters/session'}
+    get:
+      operationId: control
+      description: >
+        Authenticated WebSocket, one owner per session. Client sends
+        {"type":"heartbeat"} every five seconds and
+        {"type":"ack","call_id":"...","sequence":1} only after encrypted commit.
+        Server sends v1 EventEnvelope JSON messages, including session.ready.
+        Closing the socket revokes ownership; reconnect cannot revive calls.
+      responses:
+        '101': {description: WebSocket upgraded}
+        '409': {description: Session already owned or revoked}
+  /v1/commands:
+    post:
+      operationId: submitCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './protocol.schema.json#/$defs/command'}
+      responses:
+        '202':
+          description: Durable accepted receipt or original idempotent receipt
+          content:
+            application/json:
+              schema: {$ref: './protocol.schema.json#/$defs/receipt'}
+        '409': {description: Conflicting key, stale approval, or revoked owner}
+  /v1/commands/{command_id}:
+    get:
+      operationId: commandStatus
+      parameters:
+        - {name: command_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Recover accepted, executed, or failed receipt
+          content:
+            application/json:
+              schema: {$ref: './protocol.schema.json#/$defs/receipt'}
+  /v1/calls/{call_id}:
+    parameters:
+      - {$ref: '#/components/parameters/call'}
+    get:
+      operationId: callStatus
+      responses:
+        '200':
+          description: Current independent result dimensions
+          content:
+            application/json:
+              schema: {$ref: './protocol.schema.json#/$defs/state'}
+  /v1/calls/{call_id}/events:
+    parameters:
+      - {$ref: '#/components/parameters/call'}
+    get:
+      operationId: callEvents
+      parameters:
+        - {name: after, in: query, schema: {type: integer, minimum: 0, default: 0}}
+        - {name: wait_seconds, in: query, schema: {type: integer, minimum: 0, maximum: 30, default: 0}}
+      responses:
+        '200':
+          description: Finite batch; missing volatile content is reported as gaps
+          content:
+            application/json:
+              schema: {$ref: './protocol.schema.json#/$defs/batch'}
+  /v1/calls/{call_id}/approvals:
+    parameters:
+      - {$ref: '#/components/parameters/call'}
+    get:
+      operationId: approvals
+      responses:
+        '200': {description: Array of approval views, with exact hashes and expiry}
+components:
+  securitySchemes:
+    entra: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    session: {name: session_id, in: path, required: true, schema: {type: string}}
+    call: {name: call_id, in: path, required: true, schema: {type: string}}

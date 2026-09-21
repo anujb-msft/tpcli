@@ -1,0 +1,12 @@
+# Nonsecret example only. The UUIDs are placeholders, not working registrations.
+[profiles.example-dev]
+provider_mode = "azure"
+runtime_url = "https://runtime.example.invalid"
+tenant_id = "00000000-0000-4000-8000-000000000001"
+client_id = "00000000-0000-4000-8000-000000000002"
+scope = "api://00000000-0000-4000-8000-000000000003/tpcli.control"
+
+# Tests create their own temporary private data_dir and inject ephemeral keys.
+[profiles.local]
+provider_mode = "local-fake"
+runtime_url = "http://127.0.0.1:5080"

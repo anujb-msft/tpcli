@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/anujb-msft/tpcli/contracts/v1/protocol.schema.json",
+  "title": "tpcli protocol v1",
+  "$defs": {
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "next_cursor": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "command": {
+      "type": "object",
+      "required": ["schema_version", "session_id", "operation", "idempotency_key", "payload"],
+      "properties": {
+        "schema_version": { "const": "1" },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "operation": { "enum": ["calls.start", "calls.instruct", "calls.dtmf", "calls.stop", "approvals.resolve"] },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "call_id": { "type": ["string", "null"] },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "operation": { "const": "calls.start" } } },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/start_payload" }, "call_id": { "type": "null" } } },
+          "else": { "required": ["call_id"], "properties": { "call_id": { "type": "string", "minLength": 1 } } }
+        },
+        {
+          "if": { "properties": { "operation": { "const": "calls.instruct" } } },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/instruct_payload" } } }
+        },
+        {
+          "if": { "properties": { "operation": { "const": "calls.dtmf" } } },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/dtmf_payload" } } }
+        },
+        {
+          "if": { "properties": { "operation": { "const": "calls.stop" } } },
+          "then": { "properties": { "payload": { "type": "object", "additionalProperties": false } } }
+        },
+        {
+          "if": { "properties": { "operation": { "const": "approvals.resolve" } } },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/resolve_payload" } } }
+        }
+      ]
+    },
+    "start_payload": {
+      "type": "object",
+      "required": ["target", "task"],
+      "properties": {
+        "target": { "type": "string", "pattern": "^(pstn:\\+[1-9][0-9]{6,14}|teams:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$" },
+        "task": { "type": "string", "minLength": 1, "maxLength": 16384 },
+        "max_duration_seconds": { "type": "integer", "minimum": 30, "maximum": 3600, "default": 600 },
+        "allow_voicemail": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    },
+    "instruct_payload": {
+      "type": "object",
+      "required": ["text"],
+      "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 16384 } },
+      "additionalProperties": false
+    },
+    "dtmf_payload": {
+      "type": "object",
+      "required": ["digits"],
+      "properties": { "digits": { "type": "string", "pattern": "^[0-9*#]{1,32}$" } },
+      "additionalProperties": false
+    },
+    "resolve_payload": {
+      "type": "object",
+      "required": ["approval_id", "decision", "action_hash"],
+      "properties": {
+        "approval_id": { "type": "string", "minLength": 1 },
+        "decision": { "enum": ["approve", "deny"] },
+        "action_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "session": {
+      "type": "object",
+      "required": ["schema_version", "session_id", "status", "lease_expires_at", "provider_mode"],
+      "properties": {
+        "schema_version": { "const": "1" },
+        "session_id": { "type": "string" },
+        "status": { "enum": ["active", "ready", "revoked", "pending"] },
+        "lease_expires_at": { "type": "string", "format": "date-time" },
+        "provider_mode": { "enum": ["azure", "local-fake"] }
+      },
+      "additionalProperties": false
+    },
+    "receipt": {
+      "type": "object",
+      "required": ["schema_version", "command_id", "session_id", "operation", "status", "accepted_at", "updated_at"],
+      "properties": {
+        "schema_version": { "const": "1" },
+        "command_id": { "type": "string" },
+        "session_id": { "type": "string" },
+        "call_id": { "type": ["string", "null"] },
+        "operation": { "type": "string" },
+        "status": { "enum": ["accepted", "succeeded", "failed"] },
+        "accepted_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "error": { "$ref": "#/$defs/error" },
+        "result": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "state": {
+      "type": "object",
+      "required": ["call_id", "session_id", "target", "source", "route", "provider_mode", "created_at", "updated_at", "deadline", "lifecycle", "task_outcome", "hangup_status", "transcript_status", "summary_status", "last_sequence"],
+      "properties": {
+        "call_id": { "type": "string" },
+        "session_id": { "type": "string" },
+        "target": { "type": "string" },
+        "source": { "type": "string" },
+        "route": { "type": "string" },
+        "provider_mode": { "enum": ["azure", "local-fake"] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "lifecycle": { "enum": ["accepted", "preflight", "dialing", "connected", "ending", "ended", "failed_before_connect", "termination_unknown"] },
+        "task_outcome": { "enum": ["not_started", "in_progress", "completed", "partial", "not_completed", "unknown"] },
+        "termination_reason": { "type": ["string", "null"] },
+        "hangup_status": { "enum": ["not_applicable", "pending", "confirmed", "unknown"] },
+        "transcript_status": { "enum": ["complete", "partial", "unknown"] },
+        "summary_status": { "enum": ["pending", "complete", "partial", "unavailable"] },
+        "last_sequence": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["schema_version", "event_id", "session_id", "sequence", "timestamp", "type", "payload"],
+      "properties": {
+        "schema_version": { "const": "1" },
+        "event_id": { "type": "string", "minLength": 1 },
+        "session_id": { "type": "string", "minLength": 1 },
+        "call_id": { "type": ["string", "null"] },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "type": {
+          "enum": ["session.ready", "session.revoked", "call.state_changed", "command.accepted", "command.succeeded", "command.failed", "transcript.partial", "transcript.final", "transcript.interrupted", "transcript.gap", "approval.requested", "approval.resolved", "approval.expired", "call.warning", "call.failed", "call.termination_requested", "call.termination_confirmed", "summary.ready", "call.result"]
+        },
+        "command_id": { "type": ["string", "null"] },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "transcript": {
+      "type": "object",
+      "required": ["segment_id", "speaker", "text", "revision", "final", "interrupted", "delivery"],
+      "properties": {
+        "segment_id": { "type": "string" },
+        "speaker": { "enum": ["assistant", "recipient", "operator"] },
+        "text": { "type": "string" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "final": { "type": "boolean" },
+        "interrupted": { "type": "boolean" },
+        "delivery": { "enum": ["generated", "sent", "playback_estimated", "received", "unknown"] },
+        "provider_timestamp": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "approval": {
+      "type": "object",
+      "required": ["approval_id", "call_id", "action_hash", "expires_at", "status", "conversation_version"],
+      "properties": {
+        "approval_id": { "type": "string" },
+        "call_id": { "type": "string" },
+        "action_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "status": { "enum": ["pending", "approved", "denied", "expired", "invalidated"] },
+        "conversation_version": { "type": "integer", "minimum": 0 },
+        "description": { "type": "string" },
+        "material_terms": { "type": "object" },
+        "actor": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "batch": {
+      "type": "object",
+      "required": ["events", "next_cursor", "has_more", "call_state"],
+      "properties": {
+        "events": { "type": "array", "items": { "$ref": "#/$defs/event" }, "maxItems": 128 },
+        "next_cursor": { "type": "integer", "minimum": 0 },
+        "has_more": { "type": "boolean" },
+        "call_state": { "oneOf": [{ "$ref": "#/$defs/state" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "summary": {
+      "description": "Content is volatile in the runtime and durably encrypted only by the local broker.",
+      "type": "object",
+      "required": ["summary", "task_outcome", "transcript_status", "provider_mode", "status"],
+      "properties": {
+        "summary": { "type": "string" },
+        "task_outcome": { "enum": ["completed", "partial", "not_completed", "unknown"] },
+        "transcript_status": { "enum": ["complete", "partial", "unknown"] },
+        "provider_mode": { "enum": ["azure", "local-fake"] },
+        "status": { "enum": ["complete", "partial", "unavailable"] },
+        "facts": { "$ref": "#/$defs/result_items" },
+        "commitments": { "$ref": "#/$defs/result_items" },
+        "outstanding_items": { "$ref": "#/$defs/result_items" },
+        "source_references": { "$ref": "#/$defs/result_items" }
+      },
+      "additionalProperties": false
+    },
+    "result_items": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "result": {
+      "description": "Task, transport, content completeness and termination are separate result dimensions.",
+      "$ref": "#/$defs/state"
+    }
+  }
+}

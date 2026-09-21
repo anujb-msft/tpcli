@@ -1,0 +1,105 @@
+# Hosted runtime and independent watchdog
+
+These are deployment **definitions**, not a ready deployment or permission to
+provision anything. No deployment, tenant write, license purchase, number
+assignment, admin consent, new credentials or live call is performed by tests/CI.
+The product remains a development preview with live gates in
+[platform evidence](../docs/platform.md).
+
+## Supported architecture
+
+Use two separately scheduled Container Apps: the ASP.NET Core media/control
+runtime, and an independently executing .NET termination watchdog. Both use the
+same external durable control store. The watchdog has no public ingress, no
+conversation, and no ability to dial. The media runtime has TLS HTTPS/WebSocket
+ingress. Each has at least one replica; the initial runtime deployment is limited
+to one active replica, in addition to store-backed ownership checks.
+
+Do not host the only watchdog inside the media worker, on the user's laptop, or
+in the local broker. A dev tunnel is not remote owner-loss protection if the same
+laptop sleeps. Two apps protect against the single media-process failure boundary,
+not an entire region/control-plane outage. Monitor orphan risk and retain a manual
+provider-termination escalation route.
+
+`main.bicep` references an **existing** Container Apps environment, registry,
+user-assigned identity, Key Vault secrets, and shared control-store configuration.
+It creates only the runtime/watchdog app definitions when an operator separately
+deploys it. It does not grant permissions, create accounts, provision Teams,
+replace an inbound application, or select a source number.
+
+## Build, configure, and release separately
+
+The owner may build and test their own code privately without first choosing an
+open-source repository license. Private container builds use `runtime.Dockerfile`
+and `watchdog.Dockerfile`; images run as the non-root .NET application user.
+Public package/image distribution and any license grant are separate decisions,
+and third-party dependency-license obligations still apply. No image push or
+release is automated here.
+
+Provide runtime and watchdog settings as nonsecret environment entries. Pass
+sensitive connection strings through existing Key Vault secret references and
+Container Apps `secretRef`, never through a committed parameter file or a shell
+argument. Both processes must select the same production control-store backend;
+local SQLite is for the deterministic local harness, not a shared Azure Files
+distributed database.
+
+Set the exact Azure options documented in [platform evidence](../docs/platform.md),
+including the public callback/media origin, ACS resource, authorized Teams source,
+service-number readiness assertions, Voice Live endpoint/model/version/voice, and
+the relevant managed identity. Callback/media ingress must be authenticated as
+documented; an opaque call ID or a public tunnel is not authentication.
+
+The approved ACS media path uses a disposable application capability in the media
+WebSocket URL. The runtime stores only its digest and authority bindings in the
+shared control database; the watchdog can revoke unused authority through the
+same lease/fence state. No cloud API key or long-lived credential belongs in a URL.
+The SDK's create-time media URL cannot be replaced after connection, so the setup
+grant defaults to 90 seconds, is configurable from 5 to 120 seconds using
+`Azure__Media__SetupGrantTtlSeconds`, and is capped by the call deadline. It is
+single-use and cannot be renewed; failed or slow setup does not trigger a redial.
+
+Before setting `Azure__Media__UrlLoggingVerified=true` and the expiring
+`Azure__Media__UrlLoggingValidUntilUtc` attestation, inspect every ingress,
+proxy/WAF, SDK, access/error log, trace/APM exporter and diagnostic sink. Prove that
+URLs/query strings and payloads are absent on both successful and rejected paths.
+Application redaction alone cannot sanitize logs taken before the request reaches
+the worker. The template intentionally does not attest to infrastructure it has
+not inspected or set these flags for the operator.
+
+Configure Entra tenant, audience, and the `tpcli.control` delegated runtime
+permission. Runtime identities must have separately approved minimum ACS /
+Voice Live / Key Vault / registry access. Do not give the runtime tenant
+administration credentials. Put a TLS-validating connection configuration on the
+shared database and apply least-privilege database permissions.
+
+The runtime origin output goes into a private CLI profile based on
+`profile.example.toml`. This public example contains only placeholder UUIDs,
+a reserved phone number in documentation, and `.invalid` hostnames.
+
+### Coordinated control-store upgrades
+
+Deploy matched runtime and watchdog versions. The termination-audit migration
+preserves legacy queued timestamps as `requested_ms` and adds a nullable
+provider-invocation `started_ms`; old binaries must not write the new schema.
+Before this upgrade, stop accepting new starts, confirm/reconcile existing calls
+while keeping the old watchdog reachable, and back up the minimal metadata store
+under the operator's privacy policy. Only after all calls are safely resolved
+should both old processes be stopped and replaced together. Do not remove
+watchdog protection from unresolved calls or run mixed versions against the store.
+
+## Before any real recipient
+
+Verify source binding, Teams service number, licensing/outbound funding, ACS
+permissions, Azure Voice Live access, both authenticated callback/media paths, and
+the deployed watchdog's access to provider termination and the control store.
+`doctor --online` is non-dialing and cannot prove the complete media path.
+
+Perform separately authorized process-failure and owner-loss tests against the
+deployment, then an operator-released controlled call. Confirm actual provider
+hangup rather than merely an accepted request. Collect destination/call evidence
+privately, never in public CI artifacts, issue text, or PR descriptions.
+
+Restrict diagnostic logging to sanitized identifiers and error codes; disable
+payload logging, raw audio capture, body tracing and memory/core dumps for the
+media worker. Apply approved metadata retention only after final termination;
+never delete unresolved correlation needed to terminate an uncertain call.

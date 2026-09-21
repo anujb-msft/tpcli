@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "event_id": "00000000-0000-4000-8000-000000000003",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "call_id": "00000000-0000-4000-8000-000000000002",
+  "sequence": 8,
+  "timestamp": "2026-09-21T15:00:00Z",
+  "type": "transcript.final",
+  "command_id": null,
+  "payload": {
+    "segment_id": "segment-1",
+    "speaker": "recipient",
+    "text": "Our public opening hours are nine to five.",
+    "revision": 2,
+    "final": true,
+    "interrupted": false,
+    "delivery": "received"
+  }
+}

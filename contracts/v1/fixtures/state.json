@@ -1,0 +1,18 @@
+{
+  "call_id": "00000000-0000-4000-8000-000000000002",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "target": "pstn:+12025550123",
+  "source": "simulation",
+  "route": "simulation",
+  "provider_mode": "local-fake",
+  "created_at": "2026-09-21T15:00:00Z",
+  "updated_at": "2026-09-21T15:02:00Z",
+  "deadline": "2026-09-21T15:10:00Z",
+  "lifecycle": "termination_unknown",
+  "task_outcome": "partial",
+  "termination_reason": "owner_disconnected",
+  "hangup_status": "unknown",
+  "transcript_status": "partial",
+  "summary_status": "unavailable",
+  "last_sequence": 15
+}
