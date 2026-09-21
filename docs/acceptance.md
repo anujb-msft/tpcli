@@ -29,8 +29,8 @@ approval query/event ordering, protocol validation and shared JSON fixtures.
 The command subprocess tests exercise the shipped binary, not an in-memory CLI
 substitute.
 
-The v0.4 local checkpoint passes **13 Rust tests, 291 .NET tests** (134 Azure
-adapter and 157 runtime/control tests), and **29 Python subprocess tests**
+The v0.4 local checkpoint passes **13 Rust tests, 302 .NET tests** (134 Azure
+adapter and 168 runtime/control tests), and **29 Python subprocess tests**
 (10 CLI and 19 cross-process scenarios). The integrated .NET build has no
 warnings or errors; Rust strict clippy, both format checks, and offline Bicep
 compilation also pass. These counts describe local evidence, not live trials.
@@ -42,6 +42,8 @@ now aborts its owned sockets and awaits request cleanup before disposing the sto
 The original test passed 20 consecutive repetitions after that change. Additional
 tests cover 65,535/65,536/65,537-byte requests with and without Content-Length, and
 16,383/16,384/16,385-byte UTF-8 tasks. No request or task limit was widened.
+A barrier-controlled regression also proves that host shutdown and store deletion
+wait for a held WebSocket cleanup callback, rather than merely relying on reruns.
 
 `tests/test_e2e.py` starts real Rust CLI/broker processes, the ASP.NET Core runtime,
 and a separate .NET watchdog process. It uses ephemeral profiles, random injected

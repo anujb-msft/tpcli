@@ -20,6 +20,7 @@ public sealed class RequestBoundaryTests
     [InlineData(65537, true)]
     public async Task ExactRequestByteBoundaryIsIdenticalWithAndWithoutContentLength(int length, bool streamed)
     {
+        Assert.Equal(65536, RuntimeSettings.MaxRequestBytes);
         await using var h = new ApiHarness();
         await h.InitializeAsync();
         var session = await h.CreateSessionAsync();
@@ -30,9 +31,9 @@ public sealed class RequestBoundaryTests
         using HttpContent content = streamed ? new StreamingContent(bytes) : new ByteArrayContent(bytes);
         content.Headers.ContentType = new("application/json");
         var response = await h.Client.PostAsync("/v1/commands", content);
-        Assert.Equal(length <= RuntimeSettings.MaxRequestBytes ? HttpStatusCode.Accepted : HttpStatusCode.RequestEntityTooLarge,
+        Assert.Equal(length <= 65536 ? HttpStatusCode.Accepted : HttpStatusCode.RequestEntityTooLarge,
             response.StatusCode);
-        if (length > RuntimeSettings.MaxRequestBytes)
+        if (length > 65536)
         {
             var error = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
             Assert.Equal("REQUEST_TOO_LARGE", error["error"]!["code"]!.GetValue<string>());
@@ -45,6 +46,7 @@ public sealed class RequestBoundaryTests
     [InlineData(16385)]
     public async Task TaskLimitCountsUtf8BytesNotCharacters(int length)
     {
+        Assert.Equal(16384, RuntimeSettings.MaxTaskBytes);
         await using var h = new ApiHarness();
         await h.InitializeAsync();
         var session = await h.CreateSessionAsync();
@@ -55,7 +57,7 @@ public sealed class RequestBoundaryTests
         Assert.Equal(length, Encoding.UTF8.GetByteCount(text));
         request.Payload["task"] = text;
         var response = await h.Client.PostAsJsonAsync("/v1/commands", request, Protocol.Json);
-        Assert.Equal(length <= RuntimeSettings.MaxTaskBytes ? HttpStatusCode.Accepted : HttpStatusCode.BadRequest,
+        Assert.Equal(length <= 16384 ? HttpStatusCode.Accepted : HttpStatusCode.BadRequest,
             response.StatusCode);
     }
 

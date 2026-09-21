@@ -13,6 +13,15 @@ dotnet build runtime/Tpcli.slnx
 dotnet test runtime/Tpcli.Runtime.Tests/Tpcli.Runtime.Tests.csproj --no-build
 ```
 
+The API test harness aborts owned sockets and waits for their request-finally
+cleanup before disposing or deleting its SQLite store. `TestServer.StopAsync`
+alone does not join those WebSocket handlers: asynchronous owner revocation can
+otherwise recreate database files during directory deletion. That teardown race
+was reproduced in the published baseline as `Directory not empty` from
+`ApiHarness.DisposeAsync`, reported against the request-limit test. The current
+harness drains requests with a bounded six-second timeout rather than retrying
+or suppressing cleanup failures.
+
 Inject a fresh fake authentication token into the environment; never save it in
 a profile, command argument, source file, or log. For example, in a supervised
 development shell:
@@ -102,6 +111,8 @@ Tool signals use
   Optional string arrays `facts`, `commitments`, `outstanding_items`, and
   `source_references` accompany the summary in the bounded volatile
   `summary.ready` event only, never the durable control store.
+  Non-string array entries are rejected, not coerced or silently dropped; the
+  complete structured result shares the existing 64 KiB provider-signal budget.
 - `end_call`: ends the transport; it never invents a completed task result.
   Optional `reason` preserves safe codes `task_finished`, `recipient_objection`,
   `voicemail_not_allowed`, or `no_authorized_path`. Objection/disallowed-voicemail

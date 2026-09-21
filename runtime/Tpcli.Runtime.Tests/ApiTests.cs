@@ -27,7 +27,8 @@ internal sealed class ApiHarness : IAsyncDisposable
     public HttpClient Client { get; private set; } = null!;
     public string DatabasePath => Path.Combine(directory, "api.db");
 
-    public async Task InitializeAsync(Action<Dictionary<string, string?>>? change = null)
+    public async Task InitializeAsync(Action<Dictionary<string, string?>>? change = null,
+        Func<Task>? afterSocketCleanup = null)
     {
         Directory.CreateDirectory(directory);
         var settings = new Dictionary<string, string?>
@@ -53,8 +54,16 @@ internal sealed class ApiHarness : IAsyncDisposable
             try { await next(context); }
             finally
             {
-                requests.TryRemove(id, out _);
-                finished.TrySetResult();
+                try
+                {
+                    if (afterSocketCleanup is not null && context.WebSockets.IsWebSocketRequest)
+                        await afterSocketCleanup();
+                }
+                finally
+                {
+                    requests.TryRemove(id, out _);
+                    finished.TrySetResult();
+                }
             }
         });
         await Application.StartAsync();
@@ -137,6 +146,49 @@ internal sealed class ApiHarness : IAsyncDisposable
 
 public sealed class ApiTests
 {
+    [Fact]
+    public async Task HarnessDrainsSocketCleanupBeforeStoppingHostOrDeletingStore()
+    {
+        var h = new ApiHarness();
+        var cleanupEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostStopping = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? disposal = null;
+        string? sessionId = null;
+        string? observedStatus = null;
+        try
+        {
+            await h.InitializeAsync(afterSocketCleanup: async () =>
+            {
+                cleanupEntered.TrySetResult();
+                await releaseCleanup.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var store = h.Application.Services.GetRequiredService<ControlStore>();
+                observedStatus = (await store.TransactionAsync(tx => tx.SessionAsync(sessionId!)))?.Status;
+            });
+            using var stopping = h.Application.Lifetime.ApplicationStopping.Register(() => hostStopping.TrySetResult());
+            var session = await h.CreateSessionAsync();
+            sessionId = session.SessionId;
+            using var socket = await h.ConnectAsync(sessionId);
+            await ApiHarness.ReceiveAsync(socket);
+            disposal = h.DisposeAsync().AsTask();
+            await cleanupEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.False(hostStopping.Task.IsCompleted, "Host shutdown overtook an unfinished WebSocket request.");
+            Assert.False(disposal.IsCompleted, "Harness disposal overtook an unfinished WebSocket request.");
+            Assert.True(File.Exists(h.DatabasePath));
+            releaseCleanup.TrySetResult();
+            await disposal.WaitAsync(TimeSpan.FromSeconds(6));
+            Assert.Equal("revoked", observedStatus);
+            Assert.True(hostStopping.Task.IsCompleted);
+            Assert.False(Directory.Exists(Path.GetDirectoryName(h.DatabasePath)));
+        }
+        finally
+        {
+            releaseCleanup.TrySetResult();
+            if (disposal is not null) await disposal;
+            else await h.DisposeAsync();
+        }
+    }
+
     [Fact]
     public async Task AllV1AndInjectionEndpointsRequireTheInjectedBearerToken()
     {
