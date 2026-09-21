@@ -79,6 +79,17 @@ public sealed record EventBatch(
     bool HasMore,
     CallState? CallState);
 
+public sealed record TaskSummary(
+    string Summary,
+    string TaskOutcome,
+    string TranscriptStatus,
+    string ProviderMode,
+    string Status,
+    IReadOnlyList<string>? Facts = null,
+    IReadOnlyList<string>? Commitments = null,
+    IReadOnlyList<string>? OutstandingItems = null,
+    IReadOnlyList<string>? SourceReferences = null);
+
 public sealed record ApprovalView(
     string ApprovalId,
     string CallId,

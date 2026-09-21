@@ -195,6 +195,27 @@
       },
       "additionalProperties": false
     },
+    "summary": {
+      "description": "Content is volatile in the runtime and durably encrypted only by the local broker.",
+      "type": "object",
+      "required": ["summary", "task_outcome", "transcript_status", "provider_mode", "status"],
+      "properties": {
+        "summary": { "type": "string" },
+        "task_outcome": { "enum": ["completed", "partial", "not_completed", "unknown"] },
+        "transcript_status": { "enum": ["complete", "partial", "unknown"] },
+        "provider_mode": { "enum": ["azure", "local-fake"] },
+        "status": { "enum": ["complete", "partial", "unavailable"] },
+        "facts": { "$ref": "#/$defs/result_items" },
+        "commitments": { "$ref": "#/$defs/result_items" },
+        "outstanding_items": { "$ref": "#/$defs/result_items" },
+        "source_references": { "$ref": "#/$defs/result_items" }
+      },
+      "additionalProperties": false
+    },
+    "result_items": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "result": {
       "description": "Task, transport, content completeness and termination are separate result dimensions.",
       "$ref": "#/$defs/state"

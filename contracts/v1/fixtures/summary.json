@@ -1,0 +1,11 @@
+{
+  "summary": "Simulated opening hours were obtained; no booking or purchase was made.",
+  "task_outcome": "completed",
+  "transcript_status": "complete",
+  "provider_mode": "local-fake",
+  "status": "complete",
+  "facts": ["The simulated desk opens at 09:00."],
+  "commitments": [],
+  "outstanding_items": ["Holiday hours were not checked."],
+  "source_references": ["recipient:segment-1"]
+}

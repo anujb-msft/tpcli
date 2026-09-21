@@ -546,6 +546,80 @@ class CrossProcessTests(unittest.TestCase):
         )
         self.assertEqual(h.state(call)["lifecycle"], "connected")
 
+    def test_explicit_denial_is_audited_and_cannot_be_consumed_again(self):
+        h = self.harness()
+        _, session = h.broker()
+        call = h.start(session)["call_id"]
+        h.connected(call)
+        approval = h.request_approval(session, call)[-1]
+        receipt = h.cli(
+            "approvals", "resolve", approval["approval_id"], "--decision", "deny",
+            "--action-hash", approval["action_hash"], session=session,
+        )
+        eventually(
+            lambda: h.cli("commands", "status", receipt["command_id"], session=session),
+            lambda value: value["status"] == "succeeded",
+        )
+        denied = next(a for a in h.cli("approvals", "list", "--call", call, session=session)
+                      if a["approval_id"] == approval["approval_id"])
+        self.assertEqual(denied["status"], "denied")
+        self.assertTrue(denied.get("actor"))
+        h.cli(
+            "approvals", "resolve", approval["approval_id"], "--decision", "approve",
+            "--action-hash", approval["action_hash"], session=session, code=6,
+        )
+        self.assertEqual(h.state(call)["lifecycle"], "connected")
+
+    def test_completed_task_and_confirmed_hangup_retain_a_local_summary(self):
+        h = self.harness()
+        owner, session = h.broker()
+        call = h.start(session)["call_id"]
+        h.connected(call)
+        summary = "Simulated opening hours were obtained; no booking or purchase was made."
+        h.tool(call, "report_result", {"outcome": "completed", "summary": summary})
+        eventually(lambda: h.state(call), lambda value: value["task_outcome"] == "completed")
+        eventually(
+            lambda: h.cli("history", "show", call),
+            lambda value: value["summary"] is not None,
+        )
+        h.cli("calls", "stop", call, session=session)
+        result = h.cli("calls", "wait", call, session=session)
+        self.assertEqual(result["task_outcome"], "completed")
+        self.assertEqual(result["hangup_status"], "confirmed")
+        history = eventually(
+            lambda: h.cli("history", "show", call),
+            lambda value: value["summary"] is not None,
+        )
+        self.assertEqual(history["summary"]["summary"], summary)
+        self.assertEqual(history["state"]["summary_status"], "complete")
+        owner.stdin.close()
+        owner.wait(timeout=8)
+        self.assertEqual(h.cli("history", "show", call)["summary"]["summary"], summary)
+        for path in h.root.glob("control.db*"):
+            self.assertNotIn(summary.encode(), path.read_bytes())
+        for path in h.root.glob("*.log"):
+            self.assertNotIn(summary, path.read_text())
+
+    def test_owner_loss_invalidates_approval_even_for_a_late_authenticated_client(self):
+        h = self.harness()
+        owner, session = h.broker()
+        call = h.start(session)["call_id"]
+        h.connected(call)
+        approval = h.request_approval(session, call)[-1]
+        owner.stdin.close()
+        owner.wait(timeout=8)
+        response = h.http("POST", "/v1/commands", {
+            "schema_version": "1", "session_id": session, "call_id": call,
+            "operation": "approvals.resolve", "idempotency_key": "late-owner-approval",
+            "payload": {
+                "approval_id": approval["approval_id"], "decision": "approve",
+                "action_hash": approval["action_hash"],
+            },
+        }, expected=409)
+        self.assertIsNotNone(response["error"]["code"])
+        approvals = h.http("GET", f"/v1/calls/{call}/approvals")
+        self.assertTrue(all(a["status"] not in ("pending", "approved") for a in approvals))
+
     def test_ambiguous_create_is_not_redialed_after_reconciliation(self):
         h = self.harness({
             "Tpcli__Fake__CreateAmbiguous": "true",
