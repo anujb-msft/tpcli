@@ -1,0 +1,14 @@
+{
+  "approval_id": "00000000-0000-4000-8000-000000000005",
+  "call_id": "00000000-0000-4000-8000-000000000002",
+  "action_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expires_at": "2026-09-21T15:01:00Z",
+  "status": "pending",
+  "conversation_version": 2,
+  "description": "Confirm the offered appointment.",
+  "material_terms": {
+    "action": "confirm_appointment",
+    "time": "2026-09-24T10:00:00-07:00",
+    "cost": "none"
+  }
+}

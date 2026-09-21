@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="Tpcli.Azure.Tests/Tpcli.Azure.Tests.csproj" />
+  <Project Path="Tpcli.Azure/Tpcli.Azure.csproj" />
+  <Project Path="Tpcli.Contracts/Tpcli.Contracts.csproj" />
+  <Project Path="Tpcli.Core/Tpcli.Core.csproj" />
+  <Project Path="Tpcli.Runtime.Tests/Tpcli.Runtime.Tests.csproj" />
+  <Project Path="Tpcli.Runtime/Tpcli.Runtime.csproj" />
+  <Project Path="Tpcli.Watchdog/Tpcli.Watchdog.csproj" />
+</Solution>

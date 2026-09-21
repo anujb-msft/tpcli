@@ -1,0 +1,10 @@
+**
+!global.json
+!runtime/
+!runtime/**
+runtime/**/bin/
+runtime/**/obj/
+runtime/Tpcli.*Tests/
+runtime/**/*.db
+runtime/**/*.sqlite*
+runtime/**/.env*

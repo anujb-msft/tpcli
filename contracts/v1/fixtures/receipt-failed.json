@@ -1,0 +1,15 @@
+{
+  "schema_version": "1",
+  "command_id": "00000000-0000-4000-8000-000000000004",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "call_id": "00000000-0000-4000-8000-000000000002",
+  "operation": "calls.start",
+  "status": "failed",
+  "accepted_at": "2026-09-21T15:00:00Z",
+  "updated_at": "2026-09-21T15:00:01Z",
+  "error": {
+    "code": "CREATE_AMBIGUOUS",
+    "message": "Dispatch is uncertain; no automatic redial.",
+    "retryable": false
+  }
+}

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../Tpcli.Core/Tpcli.Core.csproj" />
+    <ProjectReference Include="../Tpcli.Azure/Tpcli.Azure.csproj" />
+  </ItemGroup>
+</Project>

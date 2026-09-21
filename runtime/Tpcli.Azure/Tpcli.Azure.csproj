@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../Tpcli.Contracts/Tpcli.Contracts.csproj" />
+    <PackageReference Include="Azure.Communication.CallAutomation" Version="1.6.0" />
+    <PackageReference Include="Azure.AI.VoiceLive" Version="1.2.0" />
+    <PackageReference Include="Azure.Identity" Version="1.21.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.12" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Tpcli.Azure.Tests" />
+  </ItemGroup>
+</Project>

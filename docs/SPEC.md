@@ -1,6 +1,7 @@
 # tpcli: Teams Phone CLI specification
 
-**Version:** 0.3  
+**Version:** 0.4
+
 **Date:** September 21, 2026  
 **Status:** Public implementation specification; live deployment readiness must be established separately.  
 **Confirmed product and executable name:** `tpcli`
@@ -33,6 +34,8 @@ Two additional explicit requirements are Azure Voice Live as the conversation en
 **Follow-up requirement:** results must remain available to stream and further commands must remain possible regardless of whether the submitting CLI process has finished. The recommended design makes the local broker a first-class component. A finished process cannot continue writing to its stdout; a live subscriber or host connection receives the continuing stream instead.
 
 All architectural choices, numerical limits, and release defaults below are **proposed implementation decisions**, not additional user answers.
+
+**Approved v0.4 amendment:** the user permits short-lived, single-use, call-scoped tokens in the ACS media WebSocket URL, with strict expiry, replay rejection, and URL-log redaction. This is an exception only for disposable media capabilities, not Azure API keys or other long-lived credentials. The authentication contract is in section 11.
 
 ## 2. Scope and successful outcomes
 
@@ -463,12 +466,27 @@ No application component records or intentionally persists raw audio. Cloud serv
 - CLI-to-runtime: Microsoft Entra user authentication, with runtime validation of tenant, audience, principal, and operation permissions. Device/browser sign-in and MFA stay with the user.
 - The broker holds the authenticated runtime connection; local clients authenticate through protected OS IPC. Enforce both local session access and remote user/tenant authorization.
 - Runtime-to-Azure: prefer managed identity and the least roles needed for ACS and Voice Live. Administrative tenant/Teams setup credentials do not become call-runtime credentials.
-- Keep sensitive runtime credentials in the platform secret store if a required SDK surface cannot yet use managed identity. No key in a WebSocket URL.
-- Validate ACS callbacks/media connections using the supported service authentication mechanism, expected call correlation, and replay protections. A public endpoint or call ID alone is not authentication.
-- Before shipping, resolve the exact ACS callback and media-WebSocket validation mechanisms in the chosen SDK/API. Fail closed if the required callback or media authentication cannot be verified.
+- Keep sensitive runtime credentials in the platform secret store if a required SDK surface cannot yet use managed identity. Never put Azure API keys or long-lived credentials in a WebSocket URL. The only approved exception is the disposable, scoped media capability described below.
+- Validate ACS callbacks with the documented webhook authentication mechanism. Authenticate media upgrades with the application-managed media grant, active call context, and replay protections. A public endpoint, call ID, or correlation header alone is not authentication.
+- Before shipping, prove callback validation, media-grant enforcement, and URL-redaction controls in the chosen SDK/API and deployed infrastructure. Do not ship unauthenticated callback or media handling.
 - Enforce destination syntax, capability support, configured source identity, duration, concurrency, and supervision independently of the model.
 - Treat provider IDs as opaque variable-length values; do not parse them into routing assumptions.
 - Do not assume all Teams user policies apply identically to TPE/API-initiated calls. Document and verify the relevant resource-account, directory, and tenant restrictions. [R3, R5]
+
+### Approved disposable media capability
+
+The checked Microsoft sources do not establish an ACS-issued identity token on the media WebSocket upgrade or a configurable media authorization header. Do not infer that ACS cannot authenticate media; the native mechanism remains unverified. The user-approved alternative is **application-level capability authentication** using the configured media transport URI. A published ACS integration describes short-lived signed media URLs, but that is not a Microsoft-native identity guarantee or a dependency on another voice provider. [R11]
+
+- Issue a fresh, cryptographically strong, single-use grant for the specific tenant, call/session, expected media endpoint, and current owner/worker generation. An opaque random token with at least 256 bits of entropy and a stored digest is a suitable implementation; an equivalently sound signed grant must still enforce one-time use.
+- Store only the digest and necessary scope/expiry/consumption metadata. Keep the raw bearer in memory and the authenticated transport-configuration exchange, never in public artifacts, receipts, local request files, ordinary logs, or durable control records.
+- Use a short, explicitly bounded setup-aware lifetime, never beyond the call deadline. Account for ringing and media-start timing rather than issuing an immediately stale token. Prefer minting immediately before media start when the SDK supports it.
+- Validate the grant, expiry, active call context, and owner/worker generation; atomically consume it across replicas before accepting the media WebSocket. Reject unknown, invalid, expired, replayed, wrong-context, revoked, and concurrently reused grants. Correlation headers are consistency checks, not credentials.
+- Revoke unused grants on call termination, owner loss, or deadline. Do not reuse a consumed grant for a reconnect, silently renew authority, or redial to repair media.
+- Do not forward untrusted audio to Voice Live before authentication. Prewarming an otherwise authorized, empty Voice Live session does not authenticate an incoming media connection.
+- Redact or suppress bearer-bearing URLs in ASP.NET hosting/access logs, proxy/ingress logs, SDK diagnostics, telemetry, errors, and traces. Redaction must cover successful and rejected handshakes. Unverified infrastructure logging remains a live-readiness blocker.
+- Retain independent ACS webhook validation and Voice Live bearer/header authentication. Never add a global shared media URL secret, an IP-only authentication substitute, or an insecure bypass flag.
+
+Possession of an unexpired grant authorizes its scoped connection; it does not prove Microsoft-issued caller identity. Leakage before consumption is a real risk, mitigated by narrow scope, short expiry, one-time use, protected issuance, and log controls. The media path remains disabled until these controls are implemented and verified. This design approval does not release any live call, deployment, purchase, or permission change.
 
 | Failure | Required response |
 | --- | --- |
@@ -508,6 +526,7 @@ All targets below are proposed engineering acceptance criteria, not measured pla
 | A14 | Offline `doctor` performs no network operations; online checks place no call and change no resource. Any billable Voice Live probe is separately explicit. |
 | A15 | Subscriber exit/backpressure does not stop a healthy call or block other commands. Owner-host exit does stop it even if the broker process has not yet exited. |
 | A16 | Retrieve a command outcome after its original process exits, including a command whose first event precedes its receipt. Replay/live subscription handoff is race-tested. Finite cursor reads, idle long-poll timeouts, and push subscriptions deliver equivalent ordered events. |
+| A17 | Media upgrades require a valid, scoped, unexpired, single-use grant. Cover tampering, unknown/wrong context, revoked owner, early callback/upgrade ordering, expiry, replay, and concurrent consumption across workers. No raw grant leaks through success/failure logs or durable records; deployed ingress/logging controls are established before a live call. |
 
 ### Performance targets
 
@@ -568,3 +587,4 @@ Public documentation read on September 21, 2026. The current direct Microsoft do
 - **[R8]** Voice Live protocol/configuration guide: https://learn.microsoft.com/en-us/azure/ai-services/speech-service/voice-live-how-to
 - **[R9]** ACS bidirectional audio streaming: https://learn.microsoft.com/en-us/azure/communication-services/how-tos/call-automation/audio-streaming-quickstart
 - **[R10]** Call Automation actions and architecture: https://learn.microsoft.com/en-us/azure/communication-services/concepts/call-automation/call-automation
+- **[R11]** Application-managed short-lived ACS media URL pattern (third-party implementation, not an ACS-native authentication guarantee): https://docs.asapp.com/generativeagent/integrate/azure-communication-services

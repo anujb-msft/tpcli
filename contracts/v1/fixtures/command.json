@@ -1,0 +1,12 @@
+{
+  "schema_version": "1",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "operation": "calls.start",
+  "idempotency_key": "fixture-attempt-1",
+  "payload": {
+    "target": "pstn:+12025550123",
+    "task": "Ask for public opening hours; do not make commitments.",
+    "max_duration_seconds": 600,
+    "allow_voicemail": false
+  }
+}
