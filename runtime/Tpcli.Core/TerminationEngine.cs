@@ -1,11 +1,13 @@
 using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging;
 using Tpcli.Contracts;
 
 namespace Tpcli.Core;
 
 public sealed class TerminationEngine(
-    ControlStore store, ICallTerminator terminator, RuntimeSettings settings, EventJournal journal)
+    ControlStore store, ICallTerminator terminator, RuntimeSettings settings, EventJournal journal,
+    ILogger<TerminationEngine> logger)
 {
     private readonly ConcurrentDictionary<string, byte> inFlight = new();
     public event Action<string>? Terminating;
@@ -24,7 +26,7 @@ public sealed class TerminationEngine(
                     : call.State.Lifecycle is "ending" or "termination_unknown" ? call.State.TerminationReason ?? "provider_error"
                     : null;
                 if (reason is not null && (call.LastTerminationAt is null
-                    || tx.Now - call.LastTerminationAt >= RuntimeSettings.WatchdogCadence))
+                    || tx.Now - call.LastTerminationAt >= RuntimeSettings.TerminationRetryCadence))
                     result.Add((call.State.CallId, reason));
             }
             return result;
@@ -70,12 +72,12 @@ public sealed class TerminationEngine(
                     call.Handle = new ProviderHandle(handle);
                 }
                 var status = call.DispatchStatus == "none" && handle is null ? "not_applicable"
-                    : handle is null || call.State.ProviderMode != settings.Mode ? "unknown" : "pending";
+                    : handle is null || call.State.ProviderMode != settings.Mode ? "unknown" : "queued";
                 var attempt = new TerminationAttempt(Safe.Id("term"), callId, call.State.ProviderMode,
-                    call.State.TerminationReason ?? reason, tx.Now, status == "pending" ? null : tx.Now,
+                    call.State.TerminationReason ?? reason, tx.Now, null, status == "queued" ? null : tx.Now,
                     status, executor, handle);
                 await tx.SaveAttemptAsync(attempt);
-                if (!wasTerminal && status != "pending")
+                if (!wasTerminal && status != "queued")
                 {
                     call.State = call.State with
                     {
@@ -93,7 +95,7 @@ public sealed class TerminationEngine(
             Terminating?.Invoke(callId);
             journal.Notify(claim.Value.Call.State.SessionId);
             if (claim.Value.Call.CompletedAt is { } complete) await journal.MarkCompletedAsync(callId, complete);
-            if (claim.Value.Attempt.Status != "pending")
+            if (claim.Value.Attempt.Status != "queued")
             {
                 inFlight.TryRemove(callId, out _);
                 return;
@@ -121,11 +123,28 @@ public sealed class TerminationEngine(
             TerminationEvidence evidence;
             using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
             {
+                Task<TerminationEvidence> operation;
                 try
                 {
-                    var operation = localHangup is null
+                    operation = localHangup is null
                         ? terminator.TerminateAsync(attempt.ConnectionId!, timeout.Token)
                         : localHangup(timeout.Token);
+                }
+                catch { operation = Task.FromResult(TerminationEvidence.Unknown); }
+                // Observe dispatch on the database clock only after invoking the provider.
+                // This conservatively includes audit-write delay, never queued intent.
+                try
+                {
+                    attempt = await store.TransactionAsync(async tx =>
+                    {
+                        var started = attempt with { StartedAt = tx.Now, Status = "pending" };
+                        await tx.SaveAttemptAsync(started);
+                        return started;
+                    });
+                }
+                catch { logger.LogWarning("TERMINATION_DISPATCH_AUDIT_UNAVAILABLE"); }
+                try
+                {
                     evidence = await operation.WaitAsync(timeout.Token);
                 }
                 catch { evidence = TerminationEvidence.Unknown; }
@@ -171,7 +190,8 @@ public sealed class TerminationEngine(
         }
         catch
         {
-            // The durable pending attempt and fenced call remain retryable by any watchdog.
+            logger.LogWarning("TERMINATION_AUDIT_UNAVAILABLE");
+            // The durable queued/pending attempt and fenced call remain retryable.
         }
         finally { inFlight.TryRemove(attempt.CallId, out _); }
     }

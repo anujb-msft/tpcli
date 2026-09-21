@@ -115,10 +115,11 @@ public sealed class CapabilityUrlHostTests
                         ["Logging:LogLevel:Default"] = "Trace"
                     });
                     builder.WebHost.UseTestServer();
-                    builder.Services.AddSingleton<IStartupFilter>(new ActivitySeed(host.Activities));
                     // Install the production Azure privacy filters, then let the real host
                     // select its fake provider. No Azure credential or SDK transport is used.
                     builder.Services.AddTpcliAzure(builder.Configuration);
+                    // Simulate hosting's pre-middleware activity, ahead of the privacy filter.
+                    builder.Services.Insert(0, ServiceDescriptor.Singleton<IStartupFilter>(new ActivitySeed(host.Activities)));
                     builder.Services.AddSingleton<IStartupFilter>(new RequestProbe(host.Requests));
                     builder.Services.Configure<LoggerFilterOptions>(options =>
                     {

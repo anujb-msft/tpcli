@@ -29,8 +29,8 @@ approval query/event ordering, protocol validation and shared JSON fixtures.
 The command subprocess tests exercise the shipped binary, not an in-memory CLI
 substitute.
 
-The v0.4 local checkpoint passes **13 Rust tests, 275 .NET tests** (132 Azure
-adapter and 143 runtime/control tests), and **29 Python subprocess tests**
+The v0.4 local checkpoint passes **13 Rust tests, 291 .NET tests** (134 Azure
+adapter and 157 runtime/control tests), and **29 Python subprocess tests**
 (10 CLI and 19 cross-process scenarios). The integrated .NET build has no
 warnings or errors; Rust strict clippy, both format checks, and offline Bicep
 compilation also pass. These counts describe local evidence, not live trials.
@@ -81,6 +81,11 @@ the recorded termination-attempt start and fake provider termination effect must
 be at most **16,000 ms** later. The longer test polling timeout is only an
 observation allowance, not a relaxed server-side requirement. Explicit owner
 loss is observed within two seconds in the local subprocess tests.
+`requested_ms` records queued termination intent; nullable `started_ms` is written
+on the database clock only after invoking the provider abstraction, not when work
+is queued. Deterministic tests separately exercise polling phase and dispatch
+jitter. A 250 ms watchdog cadence leaves initiation margin without increasing the
+one-second minimum retry cadence. No timestamp proves carrier-confirmed hangup.
 
 No local test establishes the conversational onset p95 or recipient-perceived
 interruption target. A single fast fake receipt is not a production p95 study.

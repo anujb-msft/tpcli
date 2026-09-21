@@ -124,6 +124,39 @@ public sealed class ProviderTests
     }
 
     [Fact]
+    public async Task EarlyMediaUpgradeConsumesGrantButWaitsForTrustedCallbackWithoutBindingHeaders()
+    {
+        var options = Fixture.Options();
+        var store = new MemoryGrantStore(TimeProvider.System);
+        var voice = new RecordingVoice();
+        var telephony = new FakeTelephony();
+        var correlation = new TestCorrelation();
+        await using var connection = new AzureCallConnection(Fixture.Context(), options, telephony, voice,
+            new RecordingSink(), correlation.TryBindAsync, new AzureCallRegistry(), TimeProvider.System,
+            new MediaGrantAuthentication(options, store, TimeProvider.System), Fixture.GrantScope);
+        Task<AuthenticatedMedia>? authenticating = null;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        telephony.GrantObserver = _ =>
+        {
+            authenticating = connection.AuthenticateMediaAsync(Fixture.MediaRequest(telephony.Credential), timeout.Token);
+            Assert.True(store.Entry!.Consumed);
+            Assert.False(authenticating.IsCompleted);
+            Assert.Null(correlation.BoundConnection);
+            Fixture.AssertEmptyPrewarm(voice);
+        };
+
+        await connection.InitializeAsync(timeout.Token);
+        var handle = await connection.DialAsync(timeout.Token);
+        Assert.NotNull(authenticating);
+        Assert.False(authenticating.IsCompleted);
+        connection.Connected(handle, "correlation-test");
+        var identity = await authenticating.WaitAsync(timeout.Token);
+        Assert.Equal(handle.ConnectionId, identity.ConnectionId);
+        Assert.Equal("correlation-test", identity.CorrelationId);
+        Fixture.AssertEmptyPrewarm(voice);
+    }
+
+    [Fact]
     public async Task DeadlineBlocksAllNonTerminationSideEffects()
     {
         var clock = new ManualClock(DateTimeOffset.UtcNow);

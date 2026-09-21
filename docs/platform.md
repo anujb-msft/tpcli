@@ -129,11 +129,17 @@ AzureMediaGrantScope(
   active/non-ending. Enforce one grant per call, expiry after now and no later
   than the call deadline or 120 seconds from issue. Only the SHA-256 digest of
   the 32 random bytes and minimal scope/expiry/consumption metadata are persisted.
+  A bound provider handle must **not** be an issuance prerequisite: the SDK
+  needs the capability URI in the create-call request that obtains that handle.
 * `TryConsumeAsync(scope, digest, origin, path, token)` checks the same current
   authority, deadline and non-ending state, expected origin/path and grant
   expiry, then atomically changes unconsumed to consumed. Concurrent replicas
   must have at most one winner. Unknown, changed, reused, stale/revoked-owner,
   stale-worker/fence/generation, or wrong-scope requests fail closed.
+  A valid early media upgrade can precede the SDK reply/connected callback.
+  Consumption must tolerate that ordering; the adapter then waits for trusted
+  callback correlation before activation or WebSocket acceptance. Untrusted
+  media headers cannot establish the missing provider binding.
 * No method accepts or stores the raw capability or a URL containing it. Scope
   comes from authenticated runtime records, never speech, tools or media headers.
 
@@ -413,9 +419,11 @@ The application-level suppression is concrete, not just a documentation promise:
 * A startup middleware extracts only the digest, clears `Request.QueryString`
   and parsed query values, replaces `IHttpRequestFeature.RawTarget` with the
   query-free path, and sets `Referrer-Policy: no-referrer`. Invalid and reused
-  grants are sanitized as well. Callback requests still reject original queries.
+  grants are sanitized as well. Its startup filter is placed before already
+  registered host filters. Callback requests still reject original queries.
 * Mandatory logger filters wrap configured rules, including provider-specific
-  verbose rules, to suppress `Microsoft.AspNetCore*` and `Azure.*` categories.
+  verbose rules, to suppress `Microsoft.AspNetCore*`, `Azure.*` and
+  `System.Net.Http*` categories, including named HTTP-client handlers.
   This deliberately sacrifices framework diagnostics to prevent Hosting and
   Kestrel **request-start logs before middleware** from exposing raw URLs.
   The HTTP logging interceptor separately disables all `/azure` logging fields.

@@ -20,7 +20,17 @@ namespace Tpcli.Azure.Tests;
 public sealed class MediaPrivacyTests
 {
     [Fact]
-    public void HostingKestrelSdkAndHttpLoggingFiltersOverrideVerboseProviderSpecificRules()
+    public void PrivacyFilterPrecedesAlreadyRegisteredHostStartupFilters()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<IStartupFilter, ExistingHostFilter>();
+        services.AddTpcliAzure(new ConfigurationBuilder().Build());
+        using var provider = services.BuildServiceProvider();
+        Assert.IsType<AzureMediaPrivacyFilter>(provider.GetServices<IStartupFilter>().First());
+    }
+
+    [Fact]
+    public void InfrastructureFiltersOverrideVerboseProviderSpecificRules()
     {
         var capture = new CapturedLogs();
         var services = new ServiceCollection();
@@ -32,13 +42,17 @@ public sealed class MediaPrivacyTests
             log.AddFilter<CapturedLogs>("Microsoft.AspNetCore.Server.Kestrel.BadRequests", LogLevel.Trace);
             log.AddFilter<CapturedLogs>("Microsoft.AspNetCore.HttpLogging.HttpLoggingMiddleware", LogLevel.Trace);
             log.AddFilter<CapturedLogs>("Azure.Core", LogLevel.Trace);
+            log.AddFilter("System.Net.Http", LogLevel.None);
+            log.AddFilter<CapturedLogs>("System.Net.Http.HttpClient.media.LogicalHandler", LogLevel.Trace);
+            log.AddFilter<CapturedLogs>("System.Net.Http.HttpClient.media.ClientHandler", LogLevel.Trace);
         });
         services.AddTpcliAzure(new ConfigurationBuilder().Build());
         using var provider = services.BuildServiceProvider();
         var factory = provider.GetRequiredService<ILoggerFactory>();
         var url = Fixture.TransportGrant().ForSdk().AbsoluteUri;
         foreach (var category in new[] { "Microsoft.AspNetCore.Hosting.Diagnostics",
-            "Microsoft.AspNetCore.Server.Kestrel.BadRequests", "Microsoft.AspNetCore.HttpLogging.HttpLoggingMiddleware", "Azure.Core" })
+            "Microsoft.AspNetCore.Server.Kestrel.BadRequests", "Microsoft.AspNetCore.HttpLogging.HttpLoggingMiddleware", "Azure.Core",
+            "System.Net.Http.HttpClient.media.LogicalHandler", "System.Net.Http.HttpClient.media.ClientHandler" })
             factory.CreateLogger(category).LogError(new InvalidOperationException(url), "Request starting {Url}", url);
         factory.CreateLogger("Tpcli.Azure.Tests").LogInformation("safe application marker");
         Assert.Contains(capture.Messages, message => message.Contains("safe application marker", StringComparison.Ordinal));
@@ -156,6 +170,11 @@ public sealed class MediaPrivacyTests
             Fixture.AssertEmptyPrewarm(voice);
         }
         finally { await app.StopAsync(); }
+    }
+
+    private sealed class ExistingHostFilter : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => next;
     }
 
     private sealed class CapturedLogs : ILoggerProvider

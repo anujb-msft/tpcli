@@ -44,20 +44,25 @@ internal sealed class NoCallbacks : IProviderEventSink
         throw new InvalidOperationException("WATCHDOG_DOES_NOT_ACCEPT_CALLBACKS");
 }
 
-internal sealed class WatchdogService(ControlStore store, TerminationEngine termination, ILogger<WatchdogService> logger) : BackgroundService
+internal sealed class WatchdogService(ControlStore store, TerminationEngine termination,
+    TimeProvider clock, ILogger<WatchdogService> logger) : BackgroundService
 {
     private readonly string executor = Safe.Id("watchdog");
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await store.InitializeAsync(stoppingToken);
-        using var timer = new PeriodicTimer(RuntimeSettings.WatchdogCadence);
-        var iterations = 0;
+        using var timer = new PeriodicTimer(RuntimeSettings.WatchdogCadence, clock);
+        var nextPrune = clock.GetUtcNow().AddMinutes(15);
         do
         {
             try
             {
                 await termination.SweepAsync(executor, stoppingToken);
-                if (++iterations % 900 == 0) await store.TransactionAsync(tx => tx.PruneAsync(), stoppingToken);
+                if (clock.GetUtcNow() >= nextPrune)
+                {
+                    await store.TransactionAsync(tx => tx.PruneAsync(), stoppingToken);
+                    nextPrune = clock.GetUtcNow().AddMinutes(15);
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch { logger.LogWarning("WATCHDOG_CONTROL_STORE_UNAVAILABLE"); }

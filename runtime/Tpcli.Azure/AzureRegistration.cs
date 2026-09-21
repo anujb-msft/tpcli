@@ -52,6 +52,10 @@ public static class AzureRegistration
         services.AddLogging();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IPostConfigureOptions<LoggerFilterOptions>, AzurePrivacyLogFilters>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IStartupFilter, AzureMediaPrivacyFilter>());
+        var privacyFilter = services.First(descriptor => descriptor.ServiceType == typeof(IStartupFilter) &&
+            descriptor.ImplementationType == typeof(AzureMediaPrivacyFilter));
+        services.Remove(privacyFilter);
+        services.Insert(0, privacyFilter);
         return services;
     }
 

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging.Abstractions;
 using Tpcli.Contracts;
 using Tpcli.Core;
 using Xunit;
@@ -53,7 +54,8 @@ public sealed class StoreAndReplayTests
         h.Clock.Advance(TimeSpan.FromSeconds(6));
         using var independent = new ControlStore(h.Settings, h.Clock);
         var journal = new EventJournal(independent, h.Settings, h.Clock);
-        var watchdog = new TerminationEngine(independent, new FakeCallTerminator(independent), h.Settings, journal);
+        var watchdog = new TerminationEngine(independent, new FakeCallTerminator(independent), h.Settings, journal,
+            NullLogger<TerminationEngine>.Instance);
         await watchdog.SweepAsync("independent-watchdog");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         await watchdog.DrainAsync(timeout.Token);

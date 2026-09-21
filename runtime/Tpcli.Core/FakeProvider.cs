@@ -17,7 +17,7 @@ public sealed class FakeCallTerminator(ControlStore store) : ICallTerminator
             {
                 HangupCount = simulation.HangupCount + 1,
                 Status = evidence == TerminationEvidence.Confirmed ? "terminated" : simulation.Status,
-                TerminatedAt = evidence == TerminationEvidence.Confirmed ? tx.Now : simulation.TerminatedAt
+                TerminatedAt = evidence == TerminationEvidence.Confirmed ? simulation.TerminatedAt ?? tx.Now : simulation.TerminatedAt
             });
             return evidence;
         }, cancellationToken);

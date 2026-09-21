@@ -43,7 +43,10 @@ dotnet run --project runtime/Tpcli.Watchdog --no-build
 dotnet run --project runtime/Tpcli.Watchdog --no-build -- --once
 ```
 
-The long-running watchdog checks at most one second apart. It only terminates:
+The long-running watchdog uses a 250 ms `PeriodicTimer`, leaving scheduling/
+store/dispatch headroom within the 16-second silent-owner initiation budget.
+Unknown/pending termination retries retain a separate one-second minimum
+cadence. It only terminates:
 it does not prepare providers, dial, reconnect Voice Live, or resume an actor.
 For local process-kill tests, leave this process alive when stopping/killing
 the runtime. Do not treat a watchdog on a sleeping laptop as hosted protection.
@@ -214,7 +217,24 @@ completion; ACKs can trim it earlier. Availability/completeness fields remain
 explicit after loss. Unconfirmed termination is not converted to success.
 
 `termination_attempts` durably records call ID, `provider_mode`, reason,
-`started_ms`, `completed_ms`, status, executor, and handle. The fake terminator
+`requested_ms`, nullable `started_ms`, `completed_ms`, status, executor, and
+handle. `requested_ms` is the durable queued intent; status starts as `queued`.
+`started_ms` is observed on the database clock **after** invoking the provider
+termination operation, while that operation may still be pending. It is never
+backdated to queue time and conservatively includes audit-write delay. Calls
+that never invoke a terminator keep it null. Upgrading an older control store
+moves its historical intent timestamps into `requested_ms`, leaving historical
+dispatch timestamps unknown; restart runtime and watchdog together when upgrading.
+
+For A5, compare `started_ms` with `sessions.lease_expires_ms - 15000`, the last
+accepted server heartbeat, and require a difference of at most **16000 ms**.
+Do not measure from broker-stop observation or add client polling time to the
+server bound. In simulation also inspect `fake_calls.terminated_ms` for the
+actual effect. Queued, unissued, and legacy rows with a null `started_ms` do not
+prove timely initiation. These timing guarantees require responsive control
+storage and scheduling; loss of that evidence must not be reported as success.
+
+The fake terminator
 returns confirmed only for explicit simulation state in `fake_calls`; a
 missing handle/state or provider error remains unknown. These tables allow
 external process-kill tests to inspect independent watchdog behavior.

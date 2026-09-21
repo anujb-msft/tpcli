@@ -29,9 +29,12 @@ replace an inbound application, or select a source number.
 
 ## Build, configure, and release separately
 
-The operator may build `runtime.Dockerfile` and `watchdog.Dockerfile` after selecting
-the repository license and reviewing dependency distribution obligations. Images
-run as the non-root .NET application user. No image/push/release is automated here.
+The owner may build and test their own code privately without first choosing an
+open-source repository license. Private container builds use `runtime.Dockerfile`
+and `watchdog.Dockerfile`; images run as the non-root .NET application user.
+Public package/image distribution and any license grant are separate decisions,
+and third-party dependency-license obligations still apply. No image push or
+release is automated here.
 
 Provide runtime and watchdog settings as nonsecret environment entries. Pass
 sensitive connection strings through existing Key Vault secret references and
@@ -72,6 +75,17 @@ shared database and apply least-privilege database permissions.
 The runtime origin output goes into a private CLI profile based on
 `profile.example.toml`. This public example contains only placeholder UUIDs,
 a reserved phone number in documentation, and `.invalid` hostnames.
+
+### Coordinated control-store upgrades
+
+Deploy matched runtime and watchdog versions. The termination-audit migration
+preserves legacy queued timestamps as `requested_ms` and adds a nullable
+provider-invocation `started_ms`; old binaries must not write the new schema.
+Before this upgrade, stop accepting new starts, confirm/reconcile existing calls
+while keeping the old watchdog reachable, and back up the minimal metadata store
+under the operator's privacy policy. Only after all calls are safely resolved
+should both old processes be stopped and replaced together. Do not remove
+watchdog protection from unresolved calls or run mixed versions against the store.
 
 ## Before any real recipient
 

@@ -84,5 +84,6 @@ internal sealed class AzurePrivacyLogFilters : IPostConfigureOptions<LoggerFilte
 
     private static bool SensitiveCategory(string? category) =>
         category?.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal) == true ||
-        category?.StartsWith("Azure.", StringComparison.Ordinal) == true;
+        category?.StartsWith("Azure.", StringComparison.Ordinal) == true ||
+        category?.StartsWith("System.Net.Http", StringComparison.Ordinal) == true;
 }

@@ -27,9 +27,35 @@ public sealed class ControlStore(RuntimeSettings settings, TimeProvider clock) :
                 pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;";
                 await pragma.ExecuteNonQueryAsync(cancellationToken);
             }
+            await using var transaction = connection is SqliteConnection sqlite
+                ? sqlite.BeginTransaction(deferred: false)
+                : await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
             await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            if (connection is NpgsqlConnection)
+            {
+                command.CommandText = "SELECT pg_advisory_xact_lock(78042160117);";
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
             command.CommandText = Schema;
             await command.ExecuteNonQueryAsync(cancellationToken);
+            command.CommandText = connection is SqliteConnection
+                ? "PRAGMA table_info(termination_attempts);"
+                : "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='termination_attempts';";
+            var hasRequestedTime = false;
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+                while (await reader.ReadAsync(cancellationToken))
+                    hasRequestedTime |= reader.GetString(connection is SqliteConnection ? 1 : 0) == "requested_ms";
+            if (!hasRequestedTime)
+            {
+                // Old started_ms represented queued intent, not proven dispatch.
+                command.CommandText = """
+                    ALTER TABLE termination_attempts RENAME COLUMN started_ms TO requested_ms;
+                    ALTER TABLE termination_attempts ADD COLUMN started_ms BIGINT NULL;
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
             initialized = true;
         }
         finally { gate.Release(); }
@@ -169,7 +195,7 @@ public sealed class ControlStore(RuntimeSettings settings, TimeProvider clock) :
             PRIMARY KEY(call_id, segment_hash));
         CREATE TABLE IF NOT EXISTS termination_attempts (
             id TEXT PRIMARY KEY, call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
-            provider_mode TEXT NOT NULL, reason TEXT NOT NULL, started_ms BIGINT NOT NULL,
+            provider_mode TEXT NOT NULL, reason TEXT NOT NULL, requested_ms BIGINT NOT NULL, started_ms BIGINT NULL,
             completed_ms BIGINT NULL, status TEXT NOT NULL, executor TEXT NOT NULL,
             connection_id TEXT NULL);
         CREATE INDEX IF NOT EXISTS attempts_call ON termination_attempts(call_id);
@@ -514,17 +540,17 @@ public sealed partial class ControlTransaction
     }
 
     public Task<int> SaveAttemptAsync(TerminationAttempt attempt) => ExecuteAsync("""
-        INSERT INTO termination_attempts(id,call_id,provider_mode,reason,started_ms,completed_ms,status,executor,connection_id)
-        VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8)
-        ON CONFLICT(id) DO UPDATE SET completed_ms=excluded.completed_ms,status=excluded.status
+        INSERT INTO termination_attempts(id,call_id,provider_mode,reason,requested_ms,started_ms,completed_ms,status,executor,connection_id)
+        VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9)
+        ON CONFLICT(id) DO UPDATE SET started_ms=excluded.started_ms,completed_ms=excluded.completed_ms,status=excluded.status
         """, attempt.Id, attempt.CallId, attempt.ProviderMode, attempt.Reason,
-        attempt.StartedAt.ToUnixTimeMilliseconds(), attempt.CompletedAt?.ToUnixTimeMilliseconds(),
+        attempt.RequestedAt.ToUnixTimeMilliseconds(), attempt.StartedAt?.ToUnixTimeMilliseconds(), attempt.CompletedAt?.ToUnixTimeMilliseconds(),
         attempt.Status, attempt.Executor, attempt.ConnectionId);
     public Task<List<TerminationAttempt>> AttemptsAsync(string callId) => QueryAsync("""
-        SELECT id,call_id,provider_mode,reason,started_ms,completed_ms,status,executor,connection_id
-        FROM termination_attempts WHERE call_id=@p0 ORDER BY started_ms,id
+        SELECT id,call_id,provider_mode,reason,requested_ms,started_ms,completed_ms,status,executor,connection_id
+        FROM termination_attempts WHERE call_id=@p0 ORDER BY requested_ms,id
         """, r => new TerminationAttempt(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3),
-            Time(r, 4), OptionalTime(r, 5), r.GetString(6), r.GetString(7), Text(r, 8)), callId);
+            Time(r, 4), OptionalTime(r, 5), OptionalTime(r, 6), r.GetString(7), r.GetString(8), Text(r, 9)), callId);
     public async Task<FakeCallRecord?> FakeCallAsync(string connectionId) => (await QueryAsync("""
         SELECT call_id,connection_id,status,dial_count,hangup_count,hangup_unknown,created_ms,terminated_ms
         FROM fake_calls WHERE connection_id=@p0

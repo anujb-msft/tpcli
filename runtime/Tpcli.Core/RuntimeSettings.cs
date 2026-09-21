@@ -28,7 +28,8 @@ public sealed class RuntimeSettings
     public static readonly TimeSpan ReplayRetention = TimeSpan.FromMinutes(5);
     public static readonly TimeSpan OwnerLease = TimeSpan.FromSeconds(15);
     public static readonly TimeSpan WorkerLease = TimeSpan.FromSeconds(5);
-    public static readonly TimeSpan WatchdogCadence = TimeSpan.FromSeconds(1);
+    public static readonly TimeSpan WatchdogCadence = TimeSpan.FromMilliseconds(250);
+    public static readonly TimeSpan TerminationRetryCadence = TimeSpan.FromSeconds(1);
 
     public static RuntimeSettings Load(IConfiguration configuration)
     {

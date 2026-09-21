@@ -10,6 +10,7 @@ public static class CoreServices
 {
     public static IServiceCollection AddTpcliControlStore(this IServiceCollection services, RuntimeSettings settings)
     {
+        services.AddLogging();
         services.AddSingleton(settings);
         services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<ControlStore>();

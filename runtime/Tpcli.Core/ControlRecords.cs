@@ -40,7 +40,7 @@ public sealed record StoredEvent(
         new(Protocol.Version, EventId, SessionId, CallId, Sequence, Timestamp, type ?? Type, CommandId, payload);
 }
 public sealed record TerminationAttempt(
-    string Id, string CallId, string ProviderMode, string Reason, DateTimeOffset StartedAt,
+    string Id, string CallId, string ProviderMode, string Reason, DateTimeOffset RequestedAt, DateTimeOffset? StartedAt,
     DateTimeOffset? CompletedAt, string Status, string Executor, string? ConnectionId);
 public sealed record FakeCallRecord(
     string CallId, string ConnectionId, string Status, int DialCount, int HangupCount,
